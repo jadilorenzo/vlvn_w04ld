@@ -1,0 +1,23 @@
+{
+  "traitor_ratio": 0.25,
+  "game_duration_minutes": 30,
+  "traitor_abilities": {
+    "invisibility": true,
+    "night_vision": true,
+    "special_items": [
+      "minecraft:potion{Potion:\"minecraft:invisibility\"}",
+      "minecraft:potion{Potion:\"minecraft:invisibility\"}",
+      "minecraft:potion{Potion:\"minecraft:invisibility\"}",
+      "minecraft:shulker_box"
+    ]
+  },
+  "win_conditions": {
+    "traitors_win": "eliminate_all_innocents",
+    "innocents_win": "survive_time_limit"
+  },
+  "rcon": {
+    "host": "localhost",
+    "port": 25575,
+    "password": "4bWv4S8WqwVwA6FzIhA19A"
+  }
+}
