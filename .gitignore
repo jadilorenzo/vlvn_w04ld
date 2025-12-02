@@ -1,0 +1,72 @@
+# Minecraft Server Files
+# World data
+world/
+world_saves/
+*.mca
+*.dat
+*.dat_old
+
+
+mods/
+
+# Logs
+logs/
+*.log
+*.log.gz
+*.log.*
+playit.log
+playit*.log
+debug.log
+server.log
+crafttweaker.log
+latest.log
+*.log.*.gz
+
+# Crash reports
+crash-reports/
+
+# User data
+usercache.json
+usernamecache.json
+ops.json
+whitelist.json
+banned-ips.json
+banned-players.json
+
+# Libraries (dependencies)
+libraries/
+
+# Mods (uncomment if you don't want to track mods)
+# mods/
+
+# Runtime files
+playit
+*.pid
+*.lock
+
+# Temporary files
+*.tmp
+*.temp
+*~
+
+# IDE files
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.DS_Store
+
+# Default configs (usually auto-generated)
+defaultconfigs/
+
+# Chunky (world pre-generation tool)
+chunky/
+
+# Backup files
+*.bak
+*.backup
+
+# Cache directories
+.cache/
+
