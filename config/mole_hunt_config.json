@@ -1,6 +1,6 @@
 {
   "traitor_ratio": 0.25,
-  "game_duration_minutes": 30,
+  "game_duration_minutes": 5,
   "reset_skins_to_steve": true,
   "set_dead_to_spectator": true,
   "player_tracking": {
@@ -24,7 +24,21 @@
     "traitors_win": "eliminate_all_innocents",
     "innocents_win": "survive_time_limit"
   },
+  "spawn_point": {
+    "x": -808,
+    "y": 96,
+    "z": -480
+  },
   "time_update_interval_seconds": 0.5,
+  "world_border": {
+    "enabled": false,
+    "initial_size": 8000,
+    "final_size": 300,
+    "center_x": -817,
+    "center_z": -573,
+    "delay_before_shrink_minutes": 10,
+    "shrink_duration_minutes": null
+  },
   "rcon": {
     "host": "localhost",
     "port": 25575,

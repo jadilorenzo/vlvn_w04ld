@@ -682,9 +682,18 @@ class WinConditionChecker:
 
         # Get all assigned traitors (not just alive ones) to check if any traitors were ever assigned
         all_traitors = self.role_manager.get_traitors()
+        all_innocents = self.role_manager.get_innocents()
+
+        # Debug logging for win condition checks
+        self.logger.debug(
+            f"Win condition check: alive_traitors={alive_traitors}, alive_innocents={alive_innocents}, "
+            f"all_traitors={all_traitors}, all_innocents={all_innocents}, alive_players={alive_players}")
 
         # Traitors win if all innocents are eliminated
-        if len(alive_innocents) == 0 and len(alive_traitors) > 0:
+        # Check: no alive innocents AND there were innocents assigned at game start AND there were traitors assigned
+        if len(alive_innocents) == 0 and len(all_innocents) > 0 and len(all_traitors) > 0:
+            self.logger.info(
+                f"Win condition: Traitors win - No innocents alive (alive: {len(alive_innocents)}, total assigned: {len(all_innocents)}, traitors assigned: {len(all_traitors)})")
             return ("Traitors", "All innocent players eliminated")
 
         # Innocents win if timer expires and at least one innocent survives
@@ -1008,6 +1017,9 @@ class GameState:
             self.status = GameStatus.NOT_STARTED
             return False
 
+        # Teleport all players to spawn and space them out
+        self._teleport_players_to_spawn(players, spacing=10.0)
+
         # Reset all players to Steve skin (if enabled)
         if self.config.get("reset_skins_to_steve", False):
             self.skin_manager.reset_all_players(players)
@@ -1046,6 +1058,12 @@ class GameState:
 
             self.logger.info(
                 "Initialized death tracking for spectator mode (reset all death counts to 0)")
+
+        # Perform countdown (prevents movement/block breaking)
+        if not self._countdown_and_start(players, countdown_seconds=30):
+            # Countdown was cancelled
+            self.status = GameStatus.NOT_STARTED
+            return False
 
         # Assign roles
         if test_mode and test_player and test_role:
@@ -1091,16 +1109,23 @@ class GameState:
         # Disable chat
         self._disable_chat(players)
 
+        # Set up world border (shrinking)
+        self._setup_world_border()
+
         # Start timer
         self.timer_manager.start()
 
-        # Check if we need monitoring thread (for innocents to get time updates)
-        # In test mode with single player, still start monitor if player is innocent
+        # Always start monitoring thread to check win conditions
+        # In test mode with single player, still start monitor if player is innocent (for time updates)
+        # Also start if simulated player is spawned (to check win conditions)
         needs_monitoring = not (test_mode and len(players) == 1)
-        if test_mode and len(players) == 1 and test_role == Role.INNOCENT:
-            needs_monitoring = True  # Innocents need time updates
+        if test_mode and len(players) == 1:
+            if test_role == Role.INNOCENT:
+                needs_monitoring = True  # Innocents need time updates
+            elif spawn_simulated_player:
+                needs_monitoring = True  # Need to check win conditions when simulated player dies
 
-        # Start monitoring thread (skip in test mode with 1 player, unless player is innocent)
+        # Start monitoring thread (always start if simulated player spawned, or if player is innocent)
         if needs_monitoring:
             self.status = GameStatus.IN_PROGRESS
             self.monitor_running = True
@@ -1798,6 +1823,340 @@ class GameState:
         except Exception as e:
             self.logger.warning(f"Error restoring ops: {e}")
 
+    def _setup_world_border(self):
+        """Set up a shrinking world border for the game"""
+        try:
+            world_border_config = self.config.get("world_border", {})
+            if not world_border_config.get("enabled", False):
+                self.logger.info("World border is disabled in config")
+                return
+
+            initial_size = world_border_config.get("initial_size", 2000)
+            final_size = world_border_config.get("final_size", 100)
+            center_x = world_border_config.get("center_x", 0)
+            center_z = world_border_config.get("center_z", 0)
+            delay_before_shrink_minutes = world_border_config.get(
+                "delay_before_shrink_minutes", 10)
+
+            # Get game duration
+            game_duration_minutes = self.config.get(
+                "game_duration_minutes", 30)
+
+            # Calculate shrink duration accounting for delay and 5-minute buffer
+            # Shrink should finish 5 minutes before game ends
+            # Available time = game_duration - delay - 5_min_buffer
+            available_shrink_time = max(
+                1, game_duration_minutes - delay_before_shrink_minutes - 5)
+
+            # Get shrink duration - ensure it finishes at least 5 minutes before game ends
+            shrink_duration_minutes = world_border_config.get(
+                "shrink_duration_minutes")
+            if shrink_duration_minutes is None:
+                # Use all available time (game duration - delay - 5 min buffer)
+                shrink_duration_minutes = available_shrink_time
+            else:
+                # If specified, ensure it doesn't exceed available time
+                shrink_duration_minutes = min(
+                    shrink_duration_minutes, available_shrink_time)
+
+            # Calculate shrink speed and ensure it doesn't exceed player running speed
+            # Minecraft world border "size" is diameter, so radius change is (initial - final) / 2
+            # Player sprinting speed is ~5.6 blocks/second, use 5 blocks/second as safe maximum
+            max_shrink_speed_blocks_per_second = 5.0
+
+            total_shrink_distance = (
+                initial_size - final_size) / 2  # Radius change
+            shrink_time_seconds = shrink_duration_minutes * 60
+            shrink_speed = total_shrink_distance / \
+                shrink_time_seconds if shrink_time_seconds > 0 else 0
+
+            # If shrink speed is too fast, increase the duration to slow it down
+            if shrink_speed > max_shrink_speed_blocks_per_second:
+                # Calculate minimum time needed at safe speed
+                min_time_seconds = total_shrink_distance / max_shrink_speed_blocks_per_second
+                min_time_minutes = min_time_seconds / 60
+
+                # Use the longer of: configured time or minimum safe time
+                shrink_duration_minutes = max(
+                    shrink_duration_minutes, min_time_minutes)
+                shrink_time_seconds = shrink_duration_minutes * 60
+
+                # Recalculate actual speed
+                shrink_speed = total_shrink_distance / \
+                    shrink_time_seconds if shrink_time_seconds > 0 else 0
+
+                self.logger.info(
+                    f"Adjusted shrink duration to {shrink_duration_minutes:.2f} minutes "
+                    f"to keep speed at {shrink_speed:.2f} blocks/second (max: {max_shrink_speed_blocks_per_second} blocks/second)")
+
+            delay_seconds = delay_before_shrink_minutes * 60
+
+            # Set world border center
+            self.rcon.execute(f"worldborder center {center_x} {center_z}")
+
+            # Set initial size immediately (no shrinking yet)
+            self.rcon.execute(f"worldborder set {initial_size}")
+
+            # Schedule the shrink to start after the delay
+            def start_shrink():
+                try:
+                    # Set the world border to shrink from initial_size to final_size
+                    self.rcon.execute(
+                        f"worldborder set {final_size} {shrink_time_seconds}")
+                    self.logger.info(
+                        f"World border started shrinking: {initial_size} blocks → {final_size} blocks over {shrink_duration_minutes} minutes")
+                except Exception as e:
+                    self.logger.warning(
+                        f"Error starting world border shrink: {e}")
+
+            # Start shrinking after delay
+            shrink_timer = threading.Timer(delay_seconds, start_shrink)
+            shrink_timer.daemon = True
+            shrink_timer.start()
+
+            finish_time = delay_before_shrink_minutes + shrink_duration_minutes
+            self.logger.info(
+                f"World border set: {initial_size} blocks (initial), will start shrinking after {delay_before_shrink_minutes} minutes, then shrink to {final_size} blocks over {shrink_duration_minutes} minutes (finishes at {finish_time} minutes, {game_duration_minutes - finish_time} minutes before game end)")
+        except Exception as e:
+            self.logger.warning(f"Error setting up world border: {e}")
+
+    def _reset_world_border(self):
+        """Reset world border to default settings"""
+        try:
+            # Reset to a large size (default is 29,999,984 blocks)
+            self.rcon.execute("worldborder set 29999984")
+            self.rcon.execute("worldborder center 0 0")
+            self.logger.info("World border reset to default")
+        except Exception as e:
+            self.logger.warning(f"Error resetting world border: {e}")
+
+    def _teleport_players_to_spawn(self, players: List[str], spacing: float = 10.0):
+        """Teleport all players to spawn and space them out within the specified distance"""
+        try:
+            # Get spawn coordinates from config, or try to get world spawn
+            spawn_config = self.config.get("spawn_point", {})
+            spawn_x = spawn_config.get("x")
+            spawn_y = spawn_config.get("y")
+            spawn_z = spawn_config.get("z")
+
+            # If not configured, try to get world spawn point
+            if spawn_x is None or spawn_y is None or spawn_z is None:
+                # Default to 0, 100, 0 if can't determine
+                spawn_x, spawn_y, spawn_z = 0, 100, 0
+
+                # Try to get world spawn by checking a marker entity or using world spawn
+                try:
+                    # Try to get spawn using a temporary marker entity
+                    # First, try to get spawn from world data (not directly accessible via RCON)
+                    # Instead, use the world border center if it's been set, or default
+                    world_border_config = self.config.get("world_border", {})
+                    if world_border_config.get("center_x") is not None and world_border_config.get("center_z") is not None:
+                        # Use world border center as spawn (common pattern)
+                        spawn_x = world_border_config.get("center_x", 0)
+                        spawn_z = world_border_config.get("center_z", 0)
+                        spawn_y = 100  # Default Y level
+                        self.logger.info(
+                            f"Using world border center as spawn: {spawn_x}, {spawn_y}, {spawn_z}")
+                    else:
+                        # Try to get spawn by checking where players respawn
+                        # Use a temporary approach: get first player's spawn point
+                        if players:
+                            try:
+                                # Get player's spawn point (where they respawn)
+                                response = self.rcon.execute(
+                                    f"data get entity {players[0]} SpawnPos")
+                                if response and "SpawnPos:" in response:
+                                    coords = re.findall(
+                                        r'([-\d.]+)d', response)
+                                    if len(coords) >= 3:
+                                        spawn_x = float(coords[0])
+                                        spawn_y = float(coords[1])
+                                        spawn_z = float(coords[2])
+                                        self.logger.info(
+                                            f"Got spawn from player spawn point: {spawn_x}, {spawn_y}, {spawn_z}")
+                            except Exception:
+                                pass
+                except Exception as e:
+                    self.logger.debug(
+                        f"Could not get spawn coordinates, using default: {e}")
+            else:
+                self.logger.info(
+                    f"Using configured spawn point: {spawn_x}, {spawn_y}, {spawn_z}")
+
+            # Space players out evenly in a circle within the specified spacing distance
+            num_players = len(players)
+            for i, player in enumerate(players):
+                if num_players == 1:
+                    # Single player: place at spawn
+                    x, y, z = spawn_x, spawn_y, spawn_z
+                else:
+                    # Calculate angle for circular spacing (evenly distributed around circle)
+                    angle = (2 * math.pi * i) / num_players
+                    # Distribute players evenly within the spacing radius
+                    # Use spacing as the maximum radius, ensuring all players are within 10 blocks
+                    # For better distribution, spread them across the full radius
+                    # Maximum distance from spawn (10 blocks)
+                    max_radius = spacing
+                    # Distribute evenly from center to edge
+                    distance = max_radius * (i / (num_players - 1))
+
+                    # Calculate position
+                    x = spawn_x + distance * math.cos(angle)
+                    y = spawn_y
+                    z = spawn_z + distance * math.sin(angle)
+
+                # Teleport player
+                try:
+                    self.rcon.execute(f"tp {player} {x} {y} {z}")
+                    self.logger.debug(f"Teleported {player} to {x}, {y}, {z}")
+                except Exception as e:
+                    self.logger.warning(f"Could not teleport {player}: {e}")
+
+            self.logger.info(
+                f"Teleported {num_players} player(s) to spawn and spaced them out")
+        except Exception as e:
+            self.logger.warning(f"Error teleporting players to spawn: {e}")
+
+    def _show_welcome_screen(self, players: List[str]):
+        """Show welcome screen before countdown"""
+        try:
+            for player in players:
+                try:
+                    # Show welcome title with longer display time
+                    self.rcon.execute(f"title {player} times 0 80 20")
+                    self.rcon.execute(
+                        f"title {player} title {{\"text\":\"§6§lMOLE HUNT\",\"bold\":true}}")
+                    self.rcon.execute(
+                        f"title {player} subtitle {{\"text\":\"§7Prepare for the game!\",\"bold\":false}}")
+                except Exception as e:
+                    self.logger.debug(
+                        f"Could not send welcome title to {player}: {e}")
+
+            self.notifications.tellraw_all("§6=== MOLE HUNT ===", "gold")
+            self.notifications.tellraw_all(
+                "§7Welcome! The game will begin shortly...", "yellow")
+            # Show welcome screen for 5 seconds to ensure it's visible
+            time.sleep(5)
+        except Exception as e:
+            self.logger.warning(f"Error showing welcome screen: {e}")
+
+    def _countdown_and_start(self, players: List[str], countdown_seconds: int = 30):
+        """Perform countdown, prevent movement/block breaking, then start the game"""
+        try:
+            # Show welcome screen first
+            self._show_welcome_screen(players)
+
+            # Set time to day and weather to clear
+            try:
+                self.rcon.execute("time set day")
+                self.rcon.execute("weather clear")
+                self.logger.info("Set time to day and weather to clear")
+            except Exception as e:
+                self.logger.warning(f"Could not set time/weather: {e}")
+
+            # Store player positions to freeze them in place
+            player_positions = {}
+            for player in players:
+                try:
+                    # Get current player position
+                    pos = self._get_player_coordinates(player)
+                    if pos:
+                        player_positions[player] = pos
+                        self.logger.debug(
+                            f"Stored position for {player}: {pos}")
+                except Exception as e:
+                    self.logger.warning(
+                        f"Could not get position for {player}: {e}")
+
+            # Set all players to adventure mode (prevents block breaking)
+            # Add effects to prevent movement and damage
+            for player in players:
+                try:
+                    self.rcon.execute(f"gamemode adventure {player}")
+                    # Add very high slowness to prevent horizontal movement (level 255 = maximum)
+                    self.rcon.execute(
+                        f"effect give {player} minecraft:slowness 1000000 255 true")
+                    # Add resistance level 255 to make players immune to damage
+                    self.rcon.execute(
+                        f"effect give {player} minecraft:resistance 1000000 255 true")
+                except Exception as e:
+                    self.logger.warning(
+                        f"Could not set {player} to adventure mode or apply effects: {e}")
+
+            # Countdown loop
+            for remaining in range(countdown_seconds, 0, -1):
+                if self.status != GameStatus.STARTING:
+                    # Game was cancelled
+                    return False
+
+                # Freeze players in place by teleporting them back to their stored positions
+                for player, pos in player_positions.items():
+                    try:
+                        self.rcon.execute(
+                            f"tp {player} {pos[0]} {pos[1]} {pos[2]}")
+                    except Exception as e:
+                        self.logger.debug(
+                            f"Could not freeze {player} in place: {e}")
+
+                # Show countdown every 10 seconds, or every second in last 10 seconds
+                if remaining % 10 == 0 or remaining <= 10:
+                    minutes = remaining // 60
+                    seconds = remaining % 60
+                    if minutes > 0:
+                        time_str = f"{minutes}:{seconds:02d}"
+                    else:
+                        time_str = str(seconds)
+
+                    # Title and actionbar countdown
+                    for player in players:
+                        try:
+                            self.rcon.execute(f"title {player} times 5 40 5")
+                            self.rcon.execute(
+                                f"title {player} title {{\"text\":\"§6{time_str}\",\"bold\":true}}")
+                            if remaining <= 10:
+                                self.rcon.execute(
+                                    f"title {player} subtitle {{\"text\":\"§7Game starting soon!\",\"bold\":false}}")
+                        except Exception as e:
+                            self.logger.debug(
+                                f"Could not send title to {player}: {e}")
+
+                    # Chat message for longer intervals
+                    if remaining % 30 == 0 or remaining <= 10:
+                        self.notifications.tellraw_all(
+                            f"§6Game starting in §e{time_str}§6...", "yellow")
+
+                time.sleep(1)
+
+            # Final "GO!" message
+            for player in players:
+                try:
+                    self.rcon.execute(f"title {player} times 0 60 20")
+                    self.rcon.execute(
+                        f"title {player} title {{\"text\":\"§a§lGO!\",\"bold\":true}}")
+                    self.rcon.execute(
+                        f"title {player} subtitle {{\"text\":\"§7Game has begun!\",\"bold\":false}}")
+                except Exception as e:
+                    self.logger.debug(
+                        f"Could not send GO title to {player}: {e}")
+
+            self.notifications.tellraw_all("§a§lGAME STARTED!", "green")
+
+            # Restore survival mode and clear effects to allow movement
+            for player in players:
+                try:
+                    # Clear all effects (removes slowness)
+                    self.rcon.execute(f"effect clear {player}")
+                    # Set to survival mode to allow movement and block breaking
+                    self.rcon.execute(f"gamemode survival {player}")
+                except Exception as e:
+                    self.logger.warning(
+                        f"Could not restore gamemode/clear effects for {player}: {e}")
+
+            return True
+        except Exception as e:
+            self.logger.warning(f"Error during countdown: {e}")
+            return False
+
     def _disable_chat(self, players: List[str]):
         """Disable chat for all players using teams (vanilla method)"""
         try:
@@ -1921,6 +2280,9 @@ class GameState:
         # Get all online players
         players = self.rcon.get_online_players()
 
+        # Teleport all players to spawn and space them out
+        self._teleport_players_to_spawn(players, spacing=10.0)
+
         # Announce winners FIRST so players can see the message
         self.notifications.announce_game_end(winner, reason)
 
@@ -1966,6 +2328,9 @@ class GameState:
 
             # Re-enable chat
             self._enable_chat()
+
+            # Reset world border
+            self._reset_world_border()
 
             # Clean up death scoreboard if it exists
             if self.config.get("set_dead_to_spectator", False):
