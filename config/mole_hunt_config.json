@@ -1,20 +1,30 @@
 {
   "traitor_ratio": 0.25,
   "game_duration_minutes": 30,
+  "reset_skins_to_steve": true,
+  "set_dead_to_spectator": true,
+  "player_tracking": {
+    "enabled": true,
+    "use_mod": false,
+    "mod_name": "modernplayerfinder",
+    "update_interval_seconds": 0.5,
+    "show_distance": true,
+    "show_direction": true,
+    "mod_commands": {
+      "find_player": "findplayer {target}"
+    }
+  },
   "traitor_abilities": {
-    "invisibility": true,
+    "invisibility": false,
     "night_vision": true,
-    "special_items": [
-      "minecraft:potion{Potion:\"minecraft:invisibility\"}",
-      "minecraft:potion{Potion:\"minecraft:invisibility\"}",
-      "minecraft:potion{Potion:\"minecraft:invisibility\"}",
-      "minecraft:shulker_box"
-    ]
+    "give_compass": false,
+    "special_items": []
   },
   "win_conditions": {
     "traitors_win": "eliminate_all_innocents",
     "innocents_win": "survive_time_limit"
   },
+  "time_update_interval_seconds": 0.5,
   "rcon": {
     "host": "localhost",
     "port": 25575,

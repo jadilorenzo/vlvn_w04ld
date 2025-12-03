@@ -66,9 +66,12 @@ python3 scripts/mole_hunt_game.py --start --test --test-player YourUsername --te
 
 - Invisibility effect (level 2)
 - Night vision effect
-- Iron sword and bow
+- Compass (points to spawn for navigation)
+- Special items (configured in config file)
 - Red title: "YOU ARE A TRAITOR"
 - Red chat messages with traitor instructions
+
+**Note**: Compass is automatically removed when the game ends.
 
 **What Innocents Receive:**
 
@@ -93,11 +96,45 @@ Run: `python3 -m pip install mcrcon`
 
 Make sure you have at least 2 players online before starting
 
+## Testing Player Tracking
+
+To test the player tracking feature:
+
+### Quick Test (Standalone)
+```bash
+python3 test_tracking.py
+```
+This will:
+- Check if tracking is enabled
+- Test coordinate retrieval
+- Test actionbar messages
+- Verify distance calculations
+
+### Full Game Test
+```bash
+./test_tracking.sh
+```
+Or manually:
+```bash
+python3 scripts/mole_hunt_game.py --start --test --test-player YourName --test-role traitor
+```
+
+**What to look for:**
+- Actionbar above hotbar showing: `Nearest: PlayerName (XXXm) [Direction]`
+- Updates every 3 seconds (configurable)
+- Only traitors see the tracking info
+- Distance and direction update as players move
+
 ## Configuration
 
 Edit `config/mole_hunt_config.json` to customize:
 
-- Traitor ratio (default: 25%)
+- Traitor ratio (default: 20%)
 - Game duration (default: 30 minutes)
 - Traitor abilities
+- Player tracking settings:
+  - `player_tracking.enabled` - Enable/disable tracking
+  - `player_tracking.update_interval_seconds` - How often to update (default: 3)
+  - `player_tracking.show_distance` - Show distance in meters
+  - `player_tracking.show_direction` - Show cardinal direction
 - RCON settings
