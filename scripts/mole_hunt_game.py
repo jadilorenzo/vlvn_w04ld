@@ -15,7 +15,7 @@ import logging
 import subprocess
 import sys
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from enum import Enum
 from pathlib import Path
 
@@ -50,7 +50,8 @@ class RCONClient:
         self.connection = None
         self.logger = logging.getLogger(__name__)
 
-        # Queue for RCON commands from threads (since mcrcon uses signals that don't work in threads)
+        # Queue for RCON commands from threads (since mcrcon uses signals that
+        # don't work in threads)
         self.command_queue = None
         self.response_queue = None
         self.worker_thread = None
@@ -72,7 +73,8 @@ class RCONClient:
                 worker_connection = None
                 while self.worker_running:
                     try:
-                        # Get command from queue (with timeout to allow checking worker_running)
+                        # Get command from queue (with timeout to allow
+                        # checking worker_running)
                         try:
                             command, future = self.command_queue.get(
                                 timeout=0.1)
@@ -123,7 +125,7 @@ class RCONClient:
             if self.connection:
                 try:
                     self.connection.disconnect()
-                except:
+                except BaseException:
                     pass
                 self.connection = None
 
@@ -162,7 +164,8 @@ class RCONClient:
         # (mcrcon uses signals which don't work in threads)
         if not is_main_thread:
             try:
-                # Run RCON command in a subprocess (separate Python process = can use signals)
+                # Run RCON command in a subprocess (separate Python process =
+                # can use signals)
                 script = f"""
 import sys
 from mcrcon import MCRcon
@@ -246,7 +249,8 @@ print(response, end='')
             self.logger.warning("'list' command returned no response")
             return []
 
-        # Parse "There are X of a max of Y players online: player1, player2, ..."
+        # Parse "There are X of a max of Y players online: player1, player2,
+        # ..."
         try:
             if ":" in response:
                 players_str = response.split(":")[1].strip()
@@ -380,7 +384,14 @@ class NotificationSystem:
         json_msg = json.dumps({"text": message, "color": color})
         self.rcon.execute(f'tellraw @a {json_msg}')
 
-    def title(self, player: str, title: str, subtitle: str = "", fade_in: int = 10, stay: int = 70, fade_out: int = 20):
+    def title(
+            self,
+            player: str,
+            title: str,
+            subtitle: str = "",
+            fade_in: int = 10,
+            stay: int = 70,
+            fade_out: int = 20):
         """Send title to player"""
         self.rcon.execute(f'title {player} times {fade_in} {stay} {fade_out}')
         self.rcon.execute(
@@ -389,7 +400,13 @@ class NotificationSystem:
             self.rcon.execute(
                 f'title {player} subtitle {json.dumps({"text": subtitle})}')
 
-    def title_all(self, title: str, subtitle: str = "", fade_in: int = 10, stay: int = 70, fade_out: int = 20):
+    def title_all(
+            self,
+            title: str,
+            subtitle: str = "",
+            fade_in: int = 10,
+            stay: int = 70,
+            fade_out: int = 20):
         """Send title to all players"""
         self.rcon.execute(f'title @a times {fade_in} {stay} {fade_out}')
         self.rcon.execute(f'title @a title {json.dumps({"text": title})}')
@@ -403,16 +420,24 @@ class NotificationSystem:
             self.title(player, "§4YOU ARE A TRAITOR",
                        "§7Eliminate all innocents!", 10, 100, 20)
             self.tellraw(
-                player, "§4[TRAITOR] §7Your goal is to eliminate all innocent players!", "red")
+                player,
+                "§4[TRAITOR] §7Your goal is to eliminate all innocent players!",
+                "red")
             self.tellraw(
-                player, "§7You have special abilities. Use them wisely!", "gray")
+                player,
+                "§7You have special abilities. Use them wisely!",
+                "gray")
         else:
             self.title(player, "§aYOU ARE INNOCENT",
                        "§7Survive and identify the traitors!", 10, 100, 20)
             self.tellraw(
-                player, "§a[INNOCENT] §7Your goal is to survive until time runs out!", "green")
+                player,
+                "§a[INNOCENT] §7Your goal is to survive until time runs out!",
+                "green")
             self.tellraw(
-                player, "§7Work together to identify and stop the traitors!", "gray")
+                player,
+                "§7Work together to identify and stop the traitors!",
+                "gray")
 
     def announce_game_start(self):
         """Announce game start"""
@@ -427,20 +452,40 @@ class NotificationSystem:
         if winners.lower() == "traitors":
             title_color = "§4"
             subtitle_color = "§c"
+            subtitle_text = f"{subtitle_color}{winners.upper()} WON!"
+        elif winners.lower() == "draw":
+            title_color = "§6"
+            subtitle_color = "§e"
+            subtitle_text = f"{subtitle_color}DRAW!"
         else:
             title_color = "§a"
             subtitle_color = "§2"
+            subtitle_text = f"{subtitle_color}{winners.upper()} WON!"
+
+        # Send multiple messages to ensure visibility
+        self.tellraw_all("§6" + "="*50, "gold")
+        self.tellraw_all("§6=== MOLE HUNT GAME ENDED ===", "gold")
+        self.tellraw_all("§6" + "="*50, "gold")
+        self.tellraw_all("", "white")  # Blank line for spacing
 
         self.title_all(
             f"{title_color}GAME OVER",
-            f"{subtitle_color}{winners.upper()} WON!",
+            subtitle_text,
             10, 140, 20
         )
-        self.tellraw_all("§6=== MOLE HUNT GAME ENDED ===", "gold")
-        self.tellraw_all(f"§7Winners: §6{winners}", "yellow")
-        self.tellraw_all(f"§7Reason: §6{reason}", "yellow")
 
-    def send_time_update(self, minutes: int, seconds: int, player: Optional[str] = None):
+        # Show winner and reason prominently - ALWAYS send both
+        self.tellraw_all(f"§e§lWINNERS: §r§6{winners}", "yellow")
+        # Always send reason (use provided reason or default)
+        reason_text = reason if reason else "Game ended"
+        self.tellraw_all(f"§e§lREASON: §r§6{reason_text}", "yellow")
+        self.tellraw_all("", "white")  # Blank line for spacing
+
+    def send_time_update(
+            self,
+            minutes: int,
+            seconds: int,
+            player: Optional[str] = None):
         """Send time remaining update via actionbar to specified player or all players"""
         message = f"§7Time remaining: §6{minutes}:{seconds:02d}"
         if player:
@@ -464,7 +509,12 @@ class NotificationSystem:
             self.logger.error(f"Failed to send actionbar to {player}: {e}")
             raise
 
-    def send_player_location(self, traitor: str, target_player: str, distance: float, direction: str = ""):
+    def send_player_location(
+            self,
+            traitor: str,
+            target_player: str,
+            distance: float,
+            direction: str = ""):
         """Send nearest player location info to traitor via actionbar"""
         # Format: "Nearest: PlayerName (123m) [Direction]"
         if direction:
@@ -570,10 +620,12 @@ class SkinManager:
                 cmd = cmd_template.format(player=player)
                 response = self.rcon.execute(cmd)
 
-                # Check if command succeeded (response should not contain error keywords)
+                # Check if command succeeded (response should not contain error
+                # keywords)
                 if response:
                     response_lower = response.lower()
-                    # Success indicators: no error keywords, might have success message
+                    # Success indicators: no error keywords, might have success
+                    # message
                     if ("unknown" not in response_lower and
                         "error" not in response_lower and
                         "not found" not in response_lower and
@@ -651,36 +703,43 @@ class TraitorAbilities:
 
     def remove_finder_items(self, players: List[str]):
         """Remove Modern Player Finder items from players (no-op since mod is command-based)"""
-        # Modern Player Finder is command-based, not item-based, so nothing to remove
+        # Modern Player Finder is command-based, not item-based, so nothing to
+        # remove
         pass
 
 
 class WinConditionChecker:
     """Checks win conditions"""
 
-    def __init__(self, role_manager: RoleManager, timer_manager: TimerManager, rcon_client: RCONClient):
+    def __init__(
+            self,
+            role_manager: RoleManager,
+            timer_manager: TimerManager,
+            rcon_client: RCONClient):
         self.role_manager = role_manager
         self.timer_manager = timer_manager
         self.rcon = rcon_client
         self.logger = logging.getLogger(__name__)
 
-    def check_win_conditions(self, alive_players: Optional[set] = None) -> Optional[Tuple[str, str]]:
+    def check_win_conditions(
+            self, alive_players: Optional[set] = None) -> Optional[Tuple[str, str]]:
         """Check if any win condition is met. Returns (winner, reason) or None
 
         Args:
-            alive_players: Set of alive players (excluding spectators). If None, uses all online players.
+            alive_players: Set of alive players. If None, uses all online players.
         """
         if alive_players is None:
             online_players = self.rcon.get_online_players()
             alive_players = set(online_players)
 
-        # Get alive traitors and innocents (excluding spectators)
+        # Get alive traitors and innocents
         alive_traitors = [
             p for p in self.role_manager.get_traitors() if p in alive_players]
         alive_innocents = [
             p for p in self.role_manager.get_innocents() if p in alive_players]
 
-        # Get all assigned traitors (not just alive ones) to check if any traitors were ever assigned
+        # Get all assigned traitors (not just alive ones) to check if any
+        # traitors were ever assigned
         all_traitors = self.role_manager.get_traitors()
         all_innocents = self.role_manager.get_innocents()
 
@@ -689,11 +748,29 @@ class WinConditionChecker:
             f"Win condition check: alive_traitors={alive_traitors}, alive_innocents={alive_innocents}, "
             f"all_traitors={all_traitors}, all_innocents={all_innocents}, alive_players={alive_players}")
 
+        # End game if there are neither traitors nor innocents alive
+        # This handles the case where all players have died or edge cases
+        if len(alive_traitors) == 0 and len(alive_innocents) == 0:
+            # Only end if roles were actually assigned (game was started)
+            if len(all_traitors) > 0 or len(all_innocents) > 0:
+                self.logger.info(
+                    f"Win condition: Game ended - No traitors or innocents alive "
+                    f"(alive traitors: {len(alive_traitors)}, alive innocents: {len(alive_innocents)}, "
+                    f"total traitors assigned: {len(all_traitors)}, total innocents assigned: {len(all_innocents)})")
+                return ("Draw", "No players remaining")
+
         # Traitors win if all innocents are eliminated
         # Check: no alive innocents AND there were innocents assigned at game start AND there were traitors assigned
-        if len(alive_innocents) == 0 and len(all_innocents) > 0 and len(all_traitors) > 0:
+        # Also ensure we're not in a degenerate case (e.g., only 1 innocent
+        # total)
+        if (len(alive_innocents) == 0 and
+            len(all_innocents) > 0 and
+            len(all_traitors) > 0 and
+                len(alive_traitors) > 0):  # At least one traitor must still be alive
             self.logger.info(
-                f"Win condition: Traitors win - No innocents alive (alive: {len(alive_innocents)}, total assigned: {len(all_innocents)}, traitors assigned: {len(all_traitors)})")
+                f"Win condition: Traitors win - No innocents alive (alive innocents: {len(alive_innocents)}, "
+                f"total innocents assigned: {len(all_innocents)}, alive traitors: {len(alive_traitors)}, "
+                f"total traitors assigned: {len(all_traitors)})")
             return ("Traitors", "All innocent players eliminated")
 
         # Innocents win if timer expires and at least one innocent survives
@@ -701,8 +778,12 @@ class WinConditionChecker:
             return ("Innocents", "Time limit reached")
 
         # If all traitors are eliminated, innocents win
-        # Only trigger this if traitors were actually assigned (not in test mode with single innocent)
-        if len(alive_traitors) == 0 and len(alive_innocents) > 0 and len(all_traitors) > 0:
+        # Only trigger this if traitors were actually assigned
+        if (len(alive_traitors) == 0 and len(alive_innocents) > 0 and len(all_traitors) > 0):
+            self.logger.info(
+                f"Win condition: Innocents win - All traitors eliminated (alive traitors: {len(alive_traitors)}, "
+                f"total traitors assigned: {len(all_traitors)}, alive innocents: {len(alive_innocents)}, "
+                f"total innocents assigned: {len(all_innocents)})")
             return ("Innocents", "All traitors eliminated")
 
         return None
@@ -739,14 +820,22 @@ class GameState:
         self.tracking_thread: Optional[threading.Thread] = None
         self.tracking_running = False
 
-        # Track alive players and death counts for spectator mode
+        # Track alive players
         self.alive_players: set = set()
+        # Kept for backward compatibility
         self.death_counts: Dict[str, int] = {}
         self.original_gamemodes: Dict[str, str] = {}
         self.original_ops: List[str] = []  # Store ops to restore after game
 
+        # Track potential deaths for verification (to avoid false positives)
+        # player -> timestamp when first detected
+        self.pending_deaths: Dict[str, float] = {}
+
         # Track chat state
         self.chat_disabled = False
+
+        # Track PvP state
+        self.original_pvp_state = None
 
         # Setup logging
         logging.basicConfig(
@@ -761,7 +850,10 @@ class GameState:
         self.simulated_player_name = "TestInnocent"
         self.simulated_player_entity = None
 
-    def _spawn_simulated_player(self, near_player: str, distance: float = 20.0) -> bool:
+    def _spawn_simulated_player(
+            self,
+            near_player: str,
+            distance: float = 20.0) -> bool:
         """Spawn a Carpet simulated player for testing
 
         Args:
@@ -793,14 +885,16 @@ class GameState:
 
             # Spawn Carpet simulated player at the calculated position
             # Use execute positioned to spawn at the offset location
-            # Use ~ for world-relative coordinates (not ^ which is rotation-relative)
+            # Use ~ for world-relative coordinates (not ^ which is
+            # rotation-relative)
             spawn_cmd = f"execute at {near_player} positioned ~{distance} ~ ~ run player {self.simulated_player_name} spawn"
             self.logger.info(f"Executing Carpet spawn command: {spawn_cmd}")
             response = self.rcon.execute(spawn_cmd)
             self.logger.info(f"Spawn command response: {repr(response)}")
 
             # Check if spawn was successful
-            if response and ("Unknown" not in response.lower() and "error" not in response.lower() and "does not exist" not in response.lower()):
+            if response and ("Unknown" not in response.lower(
+            ) and "error" not in response.lower() and "does not exist" not in response.lower()):
                 # Wait a moment for the player to spawn
                 # Increased wait time to ensure spawn completes
                 time.sleep(1.0)
@@ -824,7 +918,8 @@ class GameState:
                     self.logger.info(
                         f"Updated simulated_player_name to match spawned player: '{self.simulated_player_name}'")
 
-                    # Get the ACTUAL coordinates from the game, not the calculated position
+                    # Get the ACTUAL coordinates from the game, not the
+                    # calculated position
                     actual_pos = self._get_player_coordinates(
                         actual_player_name)
                     if actual_pos:
@@ -832,7 +927,8 @@ class GameState:
                             f"Spawned Carpet simulated player '{actual_player_name}' at actual position: {actual_pos}")
                         self.logger.info(
                             f"Expected position was: {spawn_pos}, player position: {player_pos}")
-                        # Store None - we'll always get coordinates from the game
+                        # Store None - we'll always get coordinates from the
+                        # game
                         self.simulated_player_entity = None
                     else:
                         self.logger.warning(
@@ -857,8 +953,7 @@ class GameState:
                     self.notifications.tellraw(
                         near_player,
                         f"§aCarpet simulated player '{actual_player_name}' spawned!",
-                        "green"
-                    )
+                        "green")
                     return True
                 else:
                     self.logger.warning(
@@ -901,8 +996,8 @@ class GameState:
 
                 # Verify removal
                 online_players_after = self.rcon.get_online_players()
-                still_online = any(p.lower() == self.simulated_player_name.lower()
-                                   for p in online_players_after)
+                still_online = any(
+                    p.lower() == self.simulated_player_name.lower() for p in online_players_after)
                 if not still_online:
                     self.logger.info(
                         f"Successfully removed Carpet simulated player '{player_to_remove}'")
@@ -921,14 +1016,16 @@ class GameState:
         except Exception as e:
             self.logger.error(f"Error removing Carpet simulated player: {e}")
 
-    def _get_simulated_player_coordinates(self) -> Optional[Tuple[float, float, float]]:
+    def _get_simulated_player_coordinates(
+            self) -> Optional[Tuple[float, float, float]]:
         """Get coordinates of the simulated player entity (armor stand or Carpet simulated player)"""
         # First check if it's a Carpet simulated player (real player entity)
         online_players = self.rcon.get_online_players()
         self.logger.debug(
             f"_get_simulated_player_coordinates: online_players={online_players}, looking for '{self.simulated_player_name}'")
         if online_players:
-            # First try exact match (should work since we update simulated_player_name after spawn)
+            # First try exact match (should work since we update
+            # simulated_player_name after spawn)
             if self.simulated_player_name in online_players:
                 self.logger.debug(
                     f"Found exact match for simulated player: '{self.simulated_player_name}'")
@@ -944,7 +1041,8 @@ class GameState:
                 self.logger.debug(
                     f"Checking player '{player}' (lower: '{player.lower()}') against '{self.simulated_player_name.lower()}'")
                 if player.lower() == self.simulated_player_name.lower():
-                    # It's a Carpet simulated player - get coordinates like a real player
+                    # It's a Carpet simulated player - get coordinates like a real
+                    # player
                     self.logger.info(
                         f"Found simulated player match (case-insensitive): '{player}' (expected '{self.simulated_player_name}')")
                     coords = self._get_player_coordinates(player)
@@ -981,7 +1079,12 @@ class GameState:
             f"Could not get coordinates for simulated player '{self.simulated_player_name}'")
         return None
 
-    def start_game(self, test_mode: bool = False, test_player: Optional[str] = None, test_role: Optional[Role] = None, spawn_simulated_player: bool = False) -> bool:
+    def start_game(
+            self,
+            test_mode: bool = False,
+            test_player: Optional[str] = None,
+            test_role: Optional[Role] = None,
+            spawn_simulated_player: bool = False) -> bool:
         """Start a new game
 
         Args:
@@ -1024,43 +1127,58 @@ class GameState:
         if self.config.get("reset_skins_to_steve", False):
             self.skin_manager.reset_all_players(players)
 
-        # Initialize death tracking and gamemode storage
-        if self.config.get("set_dead_to_spectator", False):
-            self.alive_players = set(players)
-            self.death_counts = {}
-            self.original_gamemodes = {}
-            # Store original gamemodes and initialize death tracking
-            for player in players:
-                # Try to get current gamemode (default to survival if can't determine)
-                self.original_gamemodes[player] = "survival"
-                self.death_counts[player] = 0
-            # Initialize death scoreboard (create if doesn't exist)
+        # Clear all players' inventories
+        self._clear_all_inventories(players)
+
+        # Heal all players to full health
+        self._heal_all_players(players)
+
+        # Initialize player tracking
+        self.alive_players = set(players)
+        self.death_counts = {}
+        self.original_gamemodes = {}
+
+        # Store original gamemodes and check initial spectator status
+        for player in players:
+            # Try to get current gamemode
             try:
-                self.rcon.execute(
-                    "scoreboard objectives add deaths deathCount")
-            except Exception:
-                # Scoreboard might already exist, try to remove and recreate
-                try:
-                    self.rcon.execute("scoreboard objectives remove deaths")
-                    self.rcon.execute(
-                        "scoreboard objectives add deaths deathCount")
-                except:
-                    pass  # Ignore errors, scoreboard might be managed elsewhere
+                response = self.rcon.execute(
+                    f"data get entity {player} playerGameType")
+                if response and "No entity" not in response:
+                    try:
+                        gamemode_id = int(response.split()[-1])
+                        # 0=survival, 1=creative, 2=adventure, 3=spectator
+                        gamemode_map = {
+                            0: "survival", 1: "creative", 2: "adventure", 3: "spectator"}
+                        self.original_gamemodes[player] = gamemode_map.get(
+                            gamemode_id, "survival")
 
-            # Reset all players' death counts to 0 for a clean start
-            for player in players:
-                try:
-                    self.rcon.execute(
-                        f"scoreboard players set {player} deaths 0")
-                except Exception as e:
-                    self.logger.warning(
-                        f"Could not reset death count for {player}: {e}")
+                        # If player is already in spectator, mark as dead
+                        if gamemode_id == 3:
+                            self.alive_players.discard(player)
+                            self.logger.info(
+                                f"{player} is already in spectator mode at game start")
+                        else:
+                            # Ensure player is in alive_players if not spectator
+                            self.alive_players.add(player)
+                            self.logger.debug(
+                                f"{player} gamemode at start: {gamemode_map.get(gamemode_id, 'unknown')} (id: {gamemode_id})")
+                    except (ValueError, IndexError):
+                        self.original_gamemodes[player] = "survival"
+                else:
+                    self.original_gamemodes[player] = "survival"
+            except Exception as e:
+                self.logger.debug(f"Could not get gamemode for {player}: {e}")
+                self.original_gamemodes[player] = "survival"
 
-            self.logger.info(
-                "Initialized death tracking for spectator mode (reset all death counts to 0)")
+            # Keep for backward compatibility
+            self.death_counts[player] = 0
+
+        self.logger.info(
+            f"Initialized player tracking (tracking {len(players)} players)")
 
         # Perform countdown (prevents movement/block breaking)
-        if not self._countdown_and_start(players, countdown_seconds=30):
+        if not self._countdown_and_start(players, countdown_seconds=10):
             # Countdown was cancelled
             self.status = GameStatus.NOT_STARTED
             return False
@@ -1103,11 +1221,15 @@ class GameState:
                     self.logger.info(
                         f"Informed traitor {traitor} of other traitors: {traitor_list}")
 
-        # Remove operator status from all players to prevent console messages from revealing traitors
+        # Remove operator status from all players to prevent console messages
+        # from revealing traitors
         self._deop_all_players(players)
 
         # Disable chat
         self._disable_chat(players)
+
+        # Disable PvP at game start (will be re-enabled 60 seconds later)
+        self._disable_pvp()
 
         # Set up world border (shrinking)
         self._setup_world_border()
@@ -1125,7 +1247,8 @@ class GameState:
             elif spawn_simulated_player:
                 needs_monitoring = True  # Need to check win conditions when simulated player dies
 
-        # Start monitoring thread (always start if simulated player spawned, or if player is innocent)
+        # Start monitoring thread (always start if simulated player spawned, or
+        # if player is innocent)
         if needs_monitoring:
             self.status = GameStatus.IN_PROGRESS
             self.monitor_running = True
@@ -1134,10 +1257,16 @@ class GameState:
             self.monitor_thread.start()
 
             # Start player tracking thread (if enabled and not using mod)
-            # Only start tracking if not in test mode with single innocent (tracking is for traitors only)
-            if not (test_mode and len(players) == 1 and test_role == Role.INNOCENT):
+            # Only start tracking if not in test mode with single innocent
+            # (tracking is for traitors only)
+            if not (test_mode and len(players) ==
+                    1 and test_role == Role.INNOCENT):
                 tracking_config = self.config.get("player_tracking", {})
-                if tracking_config.get("enabled", False) and not tracking_config.get("use_mod", False):
+                if tracking_config.get(
+                        "enabled",
+                        False) and not tracking_config.get(
+                        "use_mod",
+                        False):
                     self.tracking_running = True
                     self.tracking_thread = threading.Thread(
                         target=self._track_nearest_players, daemon=True)
@@ -1155,10 +1284,11 @@ class GameState:
             # Use regular tracking if simulated player will be spawned (treats simulated player like real player)
             # Otherwise use test mode tracking
             tracking_config = self.config.get("player_tracking", {})
-            if (test_mode and test_role == Role.TRAITOR and
-                    tracking_config.get("enabled", False) and not tracking_config.get("use_mod", False)):
+            if (test_mode and test_role == Role.TRAITOR and tracking_config.get(
+                    "enabled", False) and not tracking_config.get("use_mod", False)):
                 self.tracking_running = True
-                # If we're spawning a simulated player, use regular tracking (treats simulated player like real player)
+                # If we're spawning a simulated player, use regular tracking
+                # (treats simulated player like real player)
                 if spawn_simulated_player:
                     self.logger.info(
                         f"Using regular tracking - simulated player will be treated as real player")
@@ -1219,7 +1349,7 @@ class GameState:
         # Restore original skins
         self.skin_manager.restore_original_skins()
 
-        # Restore gamemodes for all players (including spectators)
+        # Restore gamemodes for all players
         self._restore_gamemodes()
 
         # Re-enable chat
@@ -1228,12 +1358,14 @@ class GameState:
         # Restore operator status to players who had it before the game
         self._restore_ops()
 
+        # Heal all players to full health
+        self._heal_all_players(players)
+
         # Clean up death scoreboard if it exists
-        if self.config.get("set_dead_to_spectator", False):
-            try:
-                self.rcon.execute("scoreboard objectives remove deaths")
-            except Exception:
-                pass  # Scoreboard might not exist, ignore error
+        try:
+            self.rcon.execute("scoreboard objectives remove deaths")
+        except Exception:
+            pass  # Scoreboard might not exist, ignore error
 
         # Reset state
         self.role_manager.reset()
@@ -1241,12 +1373,14 @@ class GameState:
         self.status = GameStatus.ENDED
         self.alive_players.clear()
         self.death_counts.clear()
+        self.pending_deaths.clear()
         self.original_gamemodes.clear()
 
         self.notifications.tellraw_all("§7Game stopped by admin", "gray")
         self.logger.info("Game stopped")
 
-    def _get_player_coordinates(self, player: str, retry: bool = True) -> Optional[Tuple[float, float, float]]:
+    def _get_player_coordinates(
+            self, player: str, retry: bool = True) -> Optional[Tuple[float, float, float]]:
         """Get player's current coordinates with retry logic for RCON failures"""
         max_retries = 2
         retry_delay = 0.5
@@ -1272,7 +1406,8 @@ class GameState:
                 # Parse response format: "PlayerName has the following entity data: [123.5d, 64.0d, -456.7d]"
                 # Or: "Pos: [123.5d, 64.0d, -456.7d]"
                 # Extract the array of coordinates: [x, y, z]
-                # Look for the pattern: [numberd, numberd, numberd] (coordinates always have 'd' suffix)
+                # Look for the pattern: [numberd, numberd, numberd]
+                # (coordinates always have 'd' suffix)
                 array_match = re.search(
                     r'\[([-\d.]+)d,\s*([-\d.]+)d,\s*([-\d.]+)d\]', response)
 
@@ -1286,7 +1421,8 @@ class GameState:
                     self.logger.debug(
                         f"Matched array pattern for {player}: {coords}")
                 else:
-                    # Fallback: try to find all numbers with 'd' suffix (coordinates)
+                    # Fallback: try to find all numbers with 'd' suffix
+                    # (coordinates)
                     matches = re.findall(r'([-\d.]+)d', response)
                     coords = []
                     for match in matches:
@@ -1319,16 +1455,28 @@ class GameState:
                     f"Error getting coordinates for {player}: {e}")
                 return None
 
-        return None
+            return None
 
-    def _calculate_distance(self, pos1: Tuple[float, float, float], pos2: Tuple[float, float, float]) -> float:
+    def _calculate_distance(self,
+                            pos1: Tuple[float,
+                                        float,
+                                        float],
+                            pos2: Tuple[float,
+                                        float,
+                                        float]) -> float:
         """Calculate 3D distance between two positions"""
         dx = pos1[0] - pos2[0]
         dy = pos1[1] - pos2[1]
         dz = pos1[2] - pos2[2]
         return (dx**2 + dy**2 + dz**2) ** 0.5
 
-    def _calculate_direction(self, traitor_pos: Tuple[float, float, float], target_pos: Tuple[float, float, float]) -> str:
+    def _calculate_direction(self,
+                             traitor_pos: Tuple[float,
+                                                float,
+                                                float],
+                             target_pos: Tuple[float,
+                                               float,
+                                               float]) -> str:
         """Calculate cardinal direction from traitor to target
 
         Minecraft coordinate system:
@@ -1387,7 +1535,8 @@ class GameState:
                 online_players = self.rcon.get_online_players()
                 self.logger.info(f"Online players: {online_players}")
 
-                # If RCON failed, online_players will be empty list - skip this iteration
+                # If RCON failed, online_players will be empty list - skip this
+                # iteration
                 if not online_players:
                     self.logger.warning(
                         "No online players found (RCON may have failed), skipping tracking update")
@@ -1395,7 +1544,8 @@ class GameState:
                     continue
 
                 # Get alive traitors and innocents
-                # Include simulated player if it exists (check both case variations)
+                # Include simulated player if it exists (check both case
+                # variations)
                 alive_traitors = [
                     t for t in traitors if t in self.alive_players and t in online_players]
                 alive_innocents = [
@@ -1405,10 +1555,12 @@ class GameState:
                     f"Alive traitors: {alive_traitors}, Alive innocents (before simulated check): {alive_innocents}")
 
                 # Also check for simulated player - treat it exactly like a real player
-                # Find the actual player name (case-insensitive match) and add it to innocents
+                # Find the actual player name (case-insensitive match) and add
+                # it to innocents
                 if self.simulated_player_name:
                     simulated_found = False
-                    # First check if it's already in alive_innocents (exact match)
+                    # First check if it's already in alive_innocents (exact
+                    # match)
                     for innocent in alive_innocents:
                         if innocent.lower() == self.simulated_player_name.lower():
                             simulated_found = True
@@ -1416,18 +1568,22 @@ class GameState:
                                 f"Simulated player '{self.simulated_player_name}' already in alive_innocents as '{innocent}'")
                             break
 
-                    # If not found, check online players for case-insensitive match
+                    # If not found, check online players for case-insensitive
+                    # match
                     if not simulated_found:
                         for player in online_players:
                             if player.lower() == self.simulated_player_name.lower():
-                                # Found simulated player - add it with its actual name
+                                # Found simulated player - add it with its
+                                # actual name
                                 if player in self.alive_players:
                                     alive_innocents.append(player)
                                     self.logger.info(
                                         f"Added simulated player '{player}' to alive_innocents (treating as real player)")
                                 else:
                                     # Simulated player is online but not in alive_players - add it now
-                                    # This handles the case where spawn command appeared to fail but player actually spawned
+                                    # This handles the case where spawn command
+                                    # appeared to fail but player actually
+                                    # spawned
                                     self.logger.info(
                                         f"Simulated player '{player}' found online but not in alive_players - adding now")
                                     if player not in self.role_manager.roles:
@@ -1563,7 +1719,8 @@ class GameState:
                 self.logger.info(
                     f"Traitor '{traitor}' position: {traitor_pos}")
 
-                # Check if we have a simulated player (armor stand or Carpet player)
+                # Check if we have a simulated player (armor stand or Carpet
+                # player)
                 simulated_pos = self._get_simulated_player_coordinates()
                 self.logger.info(
                     f"Simulated player check: name='{self.simulated_player_name}', simulated_pos={simulated_pos}")
@@ -1636,8 +1793,8 @@ class GameState:
         # Get time update interval from config (default: 3 seconds)
         time_update_interval = self.config.get(
             "time_update_interval_seconds", 3)
-        # Check win conditions every 2 seconds (less frequent to reduce RCON calls)
-        win_check_interval = 2.0
+        # Check win conditions every 1 second (frequent enough for death detection)
+        win_check_interval = 1.0
 
         while self.monitor_running and self.status == GameStatus.IN_PROGRESS:
             try:
@@ -1645,21 +1802,31 @@ class GameState:
 
                 # Check win conditions less frequently to reduce RCON overhead
                 if current_time - last_win_check >= win_check_interval:
-                    if self.config.get("set_dead_to_spectator", False):
-                        self._check_deaths_and_set_spectator()
-                        # Pass alive players to win checker
-                        result = self.win_checker.check_win_conditions(
-                            self.alive_players)
-                    else:
-                        # Check win conditions
-                        result = self.win_checker.check_win_conditions()
-                    if result:
-                        winner, reason = result
-                        self._end_game(winner, reason)
-                        break
+                    self._check_deaths()
+                    # Pass alive players to win checker - check immediately
+                    # after death processing
+                    result = self.win_checker.check_win_conditions(
+                        self.alive_players)
                     last_win_check = current_time
+                else:
+                    # Check win conditions
+                    result = self.win_checker.check_win_conditions()
 
-                # Send time updates via actionbar at configured interval (only to innocents, traitors get it with position updates)
+                # Check if win condition was detected (regardless of which branch)
+                if result:
+                    winner, reason = result
+                    self.logger.info(
+                        f"Win condition detected: {winner} wins - {reason}. Ending game...")
+                    try:
+                        self._end_game(winner, reason)
+                        self.logger.info("Game ended successfully")
+                    except Exception as e:
+                        self.logger.error(
+                            f"Error ending game: {e}", exc_info=True)
+                    break
+
+                # Send time updates via actionbar at configured interval (only
+                # to innocents, traitors get it with position updates)
                 if current_time - last_time_update >= time_update_interval:
                     remaining = self.timer_manager.get_remaining_seconds()
                     minutes = remaining // 60
@@ -1676,7 +1843,8 @@ class GameState:
                     last_time_update = current_time
 
                 # Sleep for a short interval to allow frequent time updates
-                # Use the smaller of time_update_interval or 0.5 seconds for responsive checking
+                # Use the smaller of time_update_interval or 0.5 seconds for
+                # responsive checking
                 sleep_time = min(time_update_interval, 0.5)
                 time.sleep(sleep_time)
             except Exception as e:
@@ -1685,116 +1853,244 @@ class GameState:
                 sleep_time = min(time_update_interval, 0.5)
                 time.sleep(sleep_time)
 
-    def _check_deaths_and_set_spectator(self):
-        """Check for player deaths and set dead players to spectator mode.
-        Also ensures dead players stay in spectator mode even after respawn."""
+    def _check_deaths(self):
+        """Check for player deaths by checking if players are in spectator mode."""
         try:
-            online_players = self.rcon.get_online_players()
+            online_players = set(self.rcon.get_online_players())
+            current_time = time.time()
+            # Wait 0.5 seconds before confirming death (prevents false positives)
+            verification_delay = 0.5
 
-            # Get all players who were in the game (alive + dead)
-            all_game_players = set(self.alive_players) | set(
-                self.death_counts.keys())
+            # Remove players who disconnected from alive list
+            disconnected = self.alive_players - online_players
+            for player in disconnected:
+                self.alive_players.discard(player)
+                # Clear pending death if disconnected
+                self.pending_deaths.pop(player, None)
+                self.logger.info(
+                    f"{player} disconnected and was removed from alive players")
 
-            for player in list(all_game_players):
-                if player not in online_players:
-                    # Player disconnected, remove from alive list but keep in death_counts
-                    self.alive_players.discard(player)
-                    continue
+            # Check all online players (not just those in alive_players)
+            # This ensures we catch players who should be alive but aren't tracked
+            for player in online_players:
+                try:
+                    # Check player's gamemode
+                    response = self.rcon.execute(
+                        f"data get entity {player} playerGameType")
+                    if response and "No entity" not in response:
+                        try:
+                            gamemode_id = int(response.split()[-1])
+                            # Check if this is a simulated player
+                            is_simulated = (self.simulated_player_name and
+                                            player.lower() == self.simulated_player_name.lower())
 
-                # Check death count from scoreboard
-                response = self.rcon.execute(
-                    f"scoreboard players get {player} deaths")
-                if response:
-                    try:
-                        # Parse response like "player has 1 [deaths]"
-                        # Or "player has 1"
-                        parts = response.split()
-                        if len(parts) >= 3:
-                            death_count = int(parts[2])
-                        elif len(parts) >= 2:
-                            death_count = int(parts[1])
-                        else:
-                            death_count = 0
-                    except (ValueError, IndexError):
-                        death_count = 0
-                else:
-                    death_count = 0
+                            # 3 = spectator mode
+                            if gamemode_id == 3:
+                                # Player is in spectator mode
+                                # For simulated players or players in alive_players, process death
+                                if player in self.alive_players or is_simulated:
+                                    # Check if this is a new potential death or a confirmed one
+                                    if player not in self.pending_deaths:
+                                        # First time detecting spectator mode - mark as pending
+                                        self.pending_deaths[player] = current_time
+                                        self.logger.info(
+                                            f"Potential death detected for {player} (in spectator mode, verifying...)")
+                                    else:
+                                        # Check if enough time has passed to confirm death
+                                        time_since_detection = current_time - \
+                                            self.pending_deaths[player]
+                                        if time_since_detection >= verification_delay:
+                                            # Death confirmed - player has been in spectator for verification period
+                                            self.alive_players.discard(player)
+                                            self.death_counts[player] = 1
+                                            self.pending_deaths.pop(
+                                                player, None)
 
-                # If death count increased, player died
-                if death_count > self.death_counts.get(player, 0):
-                    self.death_counts[player] = death_count
-                    if player in self.alive_players:
-                        self.alive_players.discard(player)
-                        # Set to spectator mode
-                        self.rcon.execute(f"gamemode spectator {player}")
-                        self.logger.info(
-                            f"{player} died and was set to spectator mode")
-                        # Notify player
-                        self.notifications.tellraw(
-                            player, f"§cYou died! You are now in spectator mode.", "red")
-                        # Notify all players
-                        self.notifications.tellraw_all(
-                            f"§7{player} has been eliminated!", "gray")
+                                            self.logger.info(
+                                                f"Death confirmed: {player} has been in spectator mode for {time_since_detection:.1f} seconds")
 
-                # If player is dead (not in alive_players) but has died before,
-                # ensure they stay in spectator mode (handles respawn)
-                # Continuously set them to spectator to prevent respawn bypass
-                if player not in self.alive_players and self.death_counts.get(player, 0) > 0:
-                    # Force spectator mode (handles immediate respawn)
-                    self.rcon.execute(f"gamemode spectator {player}")
+                                            # Notify player (skip for simulated players)
+                                            if not is_simulated:
+                                                self.notifications.tellraw(
+                                                    player, f"§cYou died!", "red")
+                                            # Notify all players
+                                            self.notifications.tellraw_all(
+                                                f"§7{player} has been eliminated!", "gray")
+
+                                            # ALWAYS check win conditions immediately after sending death notification
+                                            self.logger.info(
+                                                f"Checking win conditions after {player}'s death. Alive players: {self.alive_players}")
+                                            result = self.win_checker.check_win_conditions(
+                                                self.alive_players)
+                                            self.logger.info(
+                                                f"Win condition check result: {result}")
+
+                                            if result:
+                                                winner, reason = result
+                                                self.logger.info(
+                                                    f"Win condition detected after {player}'s death: {winner} wins - {reason}")
+                                                # End game in a separate thread to avoid blocking
+                                                threading.Thread(target=lambda: self._end_game(
+                                                    winner, reason), daemon=True).start()
+                                                return  # Exit early since game is ending
+                                            else:
+                                                self.logger.debug(
+                                                    f"No win condition met after {player}'s death. Game continues.")
+                            else:
+                                # Player is NOT in spectator mode
+                                # Clear any pending death if they're no longer in spectator
+                                if player in self.pending_deaths:
+                                    self.pending_deaths.pop(player, None)
+                                    self.logger.debug(
+                                        f"Cleared pending death for {player} (no longer in spectator)")
+
+                                # Ensure they're in alive_players (if they were part of the game OR are simulated player)
+                                if (player in self.original_gamemodes or is_simulated) and player not in self.alive_players:
+                                    self.alive_players.add(player)
+                                    self.logger.debug(
+                                        f"Added {player} back to alive_players (not in spectator)")
+                        except (ValueError, IndexError) as e:
+                            self.logger.debug(
+                                f"Error parsing gamemode for {player}: {response} - {e}")
+                except Exception as e:
+                    self.logger.debug(
+                        f"Error checking gamemode for {player}: {e}")
+
         except Exception as e:
             self.logger.error(f"Error checking deaths: {e}")
 
     def _restore_gamemodes(self):
-        """Restore all players to their original gamemodes"""
-        if not self.config.get("set_dead_to_spectator", False):
-            return
-
+        """Restore all players to their original gamemodes, ensuring no one stays in spectator"""
         try:
             online_players = self.rcon.get_online_players()
             for player in online_players:
                 original_gamemode = self.original_gamemodes.get(
                     player, "survival")
+                # If original was spectator, set to survival instead
+                if original_gamemode == "spectator":
+                    original_gamemode = "survival"
+                # Force set gamemode (this will take them out of spectator if they're in it)
                 self.rcon.execute(f"gamemode {original_gamemode} {player}")
                 self.logger.debug(
                     f"Restored {player} to {original_gamemode} mode")
+
+            # Double-check: ensure all players are out of spectator mode
+            for player in online_players:
+                try:
+                    response = self.rcon.execute(
+                        f"data get entity {player} playerGameType")
+                    if response and "No entity" not in response:
+                        try:
+                            gamemode_id = int(response.split()[-1])
+                            if gamemode_id == 3:  # Still in spectator
+                                self.logger.warning(
+                                    f"{player} still in spectator, forcing to survival")
+                                self.rcon.execute(
+                                    f"gamemode survival {player}")
+                        except (ValueError, IndexError):
+                            pass
+                except Exception:
+                    pass
         except Exception as e:
             self.logger.error(f"Error restoring gamemodes: {e}")
 
+    def _clear_all_inventories(self, players: List[str]):
+        """Clear all players' inventories at game start"""
+        try:
+            for player in players:
+                self.rcon.execute(f"clear {player}")
+            self.logger.info(
+                f"Cleared inventories for {len(players)} player(s)")
+        except Exception as e:
+            self.logger.warning(f"Error clearing inventories: {e}")
+
+    def _heal_all_players(self, players: List[str]):
+        """Heal all players to full health and saturation at game start"""
+        try:
+            # Try using attribute command first (more reliable)
+            try:
+                self.rcon.execute(
+                    "attribute @a minecraft:generic.max_health base set 20")
+                self.rcon.execute(
+                    "attribute @a minecraft:generic.health base set 20")
+            except BaseException:
+                # Fallback to effect method
+                pass
+
+            # Apply instant_health multiple times with reasonable amplifier
+            # Amplifier 5 = level 6 instant health, which heals 12 hearts
+            for _ in range(2):  # Apply twice to ensure full healing
+                self.rcon.execute(
+                    "effect give @a minecraft:instant_health 1 5 true")
+
+            # Restore hunger/saturation
+            self.rcon.execute(
+                "effect give @a minecraft:saturation 10 255 true")
+            self.logger.info(
+                f"Healed {len(players)} player(s) to full health and saturation")
+        except Exception as e:
+            self.logger.warning(f"Error healing players: {e}")
+
+    def _reset_health_and_hunger(self):
+        """Reset health and hunger for all players at end of game"""
+        try:
+            # Try using attribute command first (more reliable)
+            try:
+                self.rcon.execute(
+                    "attribute @a minecraft:generic.max_health base set 20")
+                self.rcon.execute(
+                    "attribute @a minecraft:generic.health base set 20")
+            except BaseException:
+                # Fallback to effect method
+                pass
+
+            # Apply instant_health multiple times with reasonable amplifier
+            # Amplifier 5 = level 6 instant health, which heals 12 hearts
+            for _ in range(2):  # Apply twice to ensure full healing
+                self.rcon.execute(
+                    "effect give @a minecraft:instant_health 1 5 true")
+
+            # Reset hunger/saturation to full for all players
+            self.rcon.execute(
+                "effect give @a minecraft:saturation 10 255 true")
+            self.logger.info("Reset health and hunger for all players")
+        except Exception as e:
+            self.logger.warning(f"Error resetting health and hunger: {e}")
+
     def _deop_all_players(self, players: List[str]):
         """Remove operator status from all players to prevent console messages from revealing traitors"""
-        try:
-            # Get list of current ops from ops.json (if accessible) or by checking each player
-            # We'll store the list and restore it later
-            self.original_ops = []
+        # try:
+        #     # Get list of current ops from ops.json (if accessible) or by checking each player
+        #     # We'll store the list and restore it later
+        #     self.original_ops = []
 
-            # Try to read ops.json to get the list of ops
-            try:
-                ops_file = "ops.json"
-                if os.path.exists(ops_file):
-                    with open(ops_file, 'r', encoding='utf-8') as f:
-                        ops_data = json.load(f)
-                        if isinstance(ops_data, list):
-                            self.original_ops = [
-                                op.get('name', '') for op in ops_data if isinstance(op, dict) and 'name' in op]
-                        elif isinstance(ops_data, dict) and 'ops' in ops_data:
-                            self.original_ops = [op.get('name', '') for op in ops_data['ops'] if isinstance(
-                                op, dict) and 'name' in op]
-            except Exception as e:
-                self.logger.debug(f"Could not read ops.json: {e}")
+        #     # Try to read ops.json to get the list of ops
+        #     try:
+        #         ops_file = "ops.json"
+        #         if os.path.exists(ops_file):
+        #             with open(ops_file, 'r', encoding='utf-8') as f:
+        #                 ops_data = json.load(f)
+        #                 if isinstance(ops_data, list):
+        #                     self.original_ops = [
+        #                         op.get('name', '') for op in ops_data if isinstance(op, dict) and 'name' in op]
+        #                 elif isinstance(ops_data, dict) and 'ops' in ops_data:
+        #                     self.original_ops = [op.get('name', '') for op in ops_data['ops'] if isinstance(
+        #                         op, dict) and 'name' in op]
+        #     except Exception as e:
+        #         self.logger.debug(f"Could not read ops.json: {e}")
 
-            # Deop all players (even if we couldn't read ops.json, deop them anyway)
-            for player in players:
-                try:
-                    self.rcon.execute(f"deop {player}")
-                    self.logger.debug(f"Deopped {player}")
-                except Exception as e:
-                    self.logger.debug(f"Could not deop {player}: {e}")
+        #     # Deop all players (even if we couldn't read ops.json, deop them anyway)
+        #     for player in players:
+        #         try:
+        #             self.rcon.execute(f"deop {player}")
+        #             self.logger.debug(f"Deopped {player}")
+        #         except Exception as e:
+        #             self.logger.debug(f"Could not deop {player}: {e}")
 
-            self.logger.info(
-                f"Removed operator status from all players (stored {len(self.original_ops)} original ops)")
-        except Exception as e:
-            self.logger.warning(f"Error deopping players: {e}")
+        #     self.logger.info(
+        #         f"Removed operator status from all players (stored {len(self.original_ops)} original ops)")
+        # except Exception as e:
+        #     self.logger.warning(f"Error deopping players: {e}")
 
     def _restore_ops(self):
         """Restore operator status to players who had it before the game"""
@@ -1848,7 +2144,8 @@ class GameState:
             available_shrink_time = max(
                 1, game_duration_minutes - delay_before_shrink_minutes - 5)
 
-            # Get shrink duration - ensure it finishes at least 5 minutes before game ends
+            # Get shrink duration - ensure it finishes at least 5 minutes
+            # before game ends
             shrink_duration_minutes = world_border_config.get(
                 "shrink_duration_minutes")
             if shrink_duration_minutes is None:
@@ -1861,7 +2158,8 @@ class GameState:
 
             # Calculate shrink speed and ensure it doesn't exceed player running speed
             # Minecraft world border "size" is diameter, so radius change is (initial - final) / 2
-            # Player sprinting speed is ~5.6 blocks/second, use 5 blocks/second as safe maximum
+            # Player sprinting speed is ~5.6 blocks/second, use 5 blocks/second
+            # as safe maximum
             max_shrink_speed_blocks_per_second = 5.0
 
             total_shrink_distance = (
@@ -1870,7 +2168,8 @@ class GameState:
             shrink_speed = total_shrink_distance / \
                 shrink_time_seconds if shrink_time_seconds > 0 else 0
 
-            # If shrink speed is too fast, increase the duration to slow it down
+            # If shrink speed is too fast, increase the duration to slow it
+            # down
             if shrink_speed > max_shrink_speed_blocks_per_second:
                 # Calculate minimum time needed at safe speed
                 min_time_seconds = total_shrink_distance / max_shrink_speed_blocks_per_second
@@ -1900,11 +2199,40 @@ class GameState:
             # Schedule the shrink to start after the delay
             def start_shrink():
                 try:
-                    # Set the world border to shrink from initial_size to final_size
+                    # Set the world border to shrink from initial_size to
+                    # final_size
                     self.rcon.execute(
                         f"worldborder set {final_size} {shrink_time_seconds}")
                     self.logger.info(
                         f"World border started shrinking: {initial_size} blocks → {final_size} blocks over {shrink_duration_minutes} minutes")
+
+                    # Announce to all players that the border is starting to
+                    # shrink
+                    try:
+                        players = self.rcon.get_online_players()
+                        for player in players:
+                            try:
+                                self.rcon.execute(
+                                    f"title {player} times 0 60 20")
+                                self.rcon.execute(
+                                    f"title {player} title {{\"text\":\"§c§lWORLD BORDER SHRINKING\",\"bold\":true}}")
+                                self.rcon.execute(
+                                    f"title {player} subtitle {{\"text\":\"§7The border is closing in!\",\"bold\":false}}")
+                            except Exception as e:
+                                self.logger.debug(
+                                    f"Could not send title to {player}: {e}")
+
+                        self.notifications.tellraw_all(
+                            "§c§l⚠ WORLD BORDER SHRINKING ⚠", "red")
+                        self.notifications.tellraw_all(
+                            f"§7The world border is now shrinking from §e{initial_size}§7 blocks to §e{final_size}§7 blocks",
+                            "yellow")
+                        self.notifications.tellraw_all(
+                            f"§7Shrinking over §e{shrink_duration_minutes}§7 minutes at §e{shrink_speed:.2f}§7 blocks/second",
+                            "yellow")
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Could not announce world border shrink: {e}")
                 except Exception as e:
                     self.logger.warning(
                         f"Error starting world border shrink: {e}")
@@ -1930,7 +2258,42 @@ class GameState:
         except Exception as e:
             self.logger.warning(f"Error resetting world border: {e}")
 
-    def _teleport_players_to_spawn(self, players: List[str], spacing: float = 10.0):
+    def _disable_pvp(self):
+        """Disable PvP at game start"""
+        try:
+            # Get current PvP state
+            response = self.rcon.execute("gamerule pvp")
+            if response:
+                # Parse response like "pvp = true" or "pvp = false"
+                if "true" in response.lower():
+                    self.original_pvp_state = True
+                else:
+                    self.original_pvp_state = False
+            else:
+                self.original_pvp_state = True  # Default to True if can't determine
+
+            # Disable PvP
+            self.rcon.execute("gamerule pvp false")
+            self.logger.info(
+                "PvP disabled (will be re-enabled 60 seconds after game start)")
+        except Exception as e:
+            self.logger.warning(f"Error disabling PvP: {e}")
+
+    def _enable_pvp(self):
+        """Re-enable PvP 60 seconds after game start"""
+        try:
+            self.rcon.execute("gamerule pvp true")
+            self.notifications.tellraw_all("§c§lPvP ENABLED", "red")
+            self.notifications.tellraw_all(
+                "§7Players can now attack each other!", "yellow")
+            self.logger.info("PvP enabled (60 seconds after game start)")
+        except Exception as e:
+            self.logger.warning(f"Error enabling PvP: {e}")
+
+    def _teleport_players_to_spawn(
+            self,
+            players: List[str],
+            spacing: float = 10.0):
         """Teleport all players to spawn and space them out within the specified distance"""
         try:
             # Get spawn coordinates from config, or try to get world spawn
@@ -1944,13 +2307,16 @@ class GameState:
                 # Default to 0, 100, 0 if can't determine
                 spawn_x, spawn_y, spawn_z = 0, 100, 0
 
-                # Try to get world spawn by checking a marker entity or using world spawn
+                # Try to get world spawn by checking a marker entity or using
+                # world spawn
                 try:
                     # Try to get spawn using a temporary marker entity
                     # First, try to get spawn from world data (not directly accessible via RCON)
-                    # Instead, use the world border center if it's been set, or default
+                    # Instead, use the world border center if it's been set, or
+                    # default
                     world_border_config = self.config.get("world_border", {})
-                    if world_border_config.get("center_x") is not None and world_border_config.get("center_z") is not None:
+                    if world_border_config.get("center_x") is not None and world_border_config.get(
+                            "center_z") is not None:
                         # Use world border center as spawn (common pattern)
                         spawn_x = world_border_config.get("center_x", 0)
                         spawn_z = world_border_config.get("center_z", 0)
@@ -1959,7 +2325,8 @@ class GameState:
                             f"Using world border center as spawn: {spawn_x}, {spawn_y}, {spawn_z}")
                     else:
                         # Try to get spawn by checking where players respawn
-                        # Use a temporary approach: get first player's spawn point
+                        # Use a temporary approach: get first player's spawn
+                        # point
                         if players:
                             try:
                                 # Get player's spawn point (where they respawn)
@@ -1983,14 +2350,16 @@ class GameState:
                 self.logger.info(
                     f"Using configured spawn point: {spawn_x}, {spawn_y}, {spawn_z}")
 
-            # Space players out evenly in a circle within the specified spacing distance
+            # Space players out evenly in a circle within the specified spacing
+            # distance
             num_players = len(players)
             for i, player in enumerate(players):
                 if num_players == 1:
                     # Single player: place at spawn
                     x, y, z = spawn_x, spawn_y, spawn_z
                 else:
-                    # Calculate angle for circular spacing (evenly distributed around circle)
+                    # Calculate angle for circular spacing (evenly distributed
+                    # around circle)
                     angle = (2 * math.pi * i) / num_players
                     # Distribute players evenly within the spacing radius
                     # Use spacing as the maximum radius, ensuring all players are within 10 blocks
@@ -2040,7 +2409,10 @@ class GameState:
         except Exception as e:
             self.logger.warning(f"Error showing welcome screen: {e}")
 
-    def _countdown_and_start(self, players: List[str], countdown_seconds: int = 30):
+    def _countdown_and_start(
+            self,
+            players: List[str],
+            countdown_seconds: int = 30):
         """Perform countdown, prevent movement/block breaking, then start the game"""
         try:
             # Show welcome screen first
@@ -2073,7 +2445,8 @@ class GameState:
             for player in players:
                 try:
                     self.rcon.execute(f"gamemode adventure {player}")
-                    # Add very high slowness to prevent horizontal movement (level 255 = maximum)
+                    # Add very high slowness to prevent horizontal movement
+                    # (level 255 = maximum)
                     self.rcon.execute(
                         f"effect give {player} minecraft:slowness 1000000 255 true")
                     # Add resistance level 255 to make players immune to damage
@@ -2089,7 +2462,8 @@ class GameState:
                     # Game was cancelled
                     return False
 
-                # Freeze players in place by teleporting them back to their stored positions
+                # Freeze players in place by teleporting them back to their
+                # stored positions
                 for player, pos in player_positions.items():
                     try:
                         self.rcon.execute(
@@ -2098,7 +2472,8 @@ class GameState:
                         self.logger.debug(
                             f"Could not freeze {player} in place: {e}")
 
-                # Show countdown every 10 seconds, or every second in last 10 seconds
+                # Show countdown every 10 seconds, or every second in last 10
+                # seconds
                 if remaining % 10 == 0 or remaining <= 10:
                     minutes = remaining // 60
                     seconds = remaining % 60
@@ -2185,7 +2560,7 @@ class GameState:
                             f"Disabled chat using mod command: {cmd}")
                         self.chat_disabled = True
                         return
-                except:
+                except BaseException:
                     pass
 
             # Vanilla method: Put each player in their own team to prevent cross-player chat
@@ -2197,7 +2572,8 @@ class GameState:
                 try:
                     # Create a unique team for each player
                     self.rcon.execute(f"team add {team_name}")
-                    # Set team to not see friendly invisibles (prevents some interactions)
+                    # Set team to not see friendly invisibles (prevents some
+                    # interactions)
                     self.rcon.execute(
                         f"team modify {team_name} seeFriendlyInvisibles false")
                     # Hide nametags for anonymity
@@ -2205,6 +2581,11 @@ class GameState:
                         f"team modify {team_name} nametagVisibility never")
                     # Add player to their own isolated team
                     self.rcon.execute(f"team join {team_name} {player}")
+                    # Hide chat and death messages for this player's team
+                    self.rcon.execute(
+                        f"team modify {team_name} chatVisibility hidden")
+                    self.rcon.execute(
+                        f"team modify {team_name} deathMessageVisibility never")
                 except Exception as e:
                     self.logger.debug(
                         f"Could not create team for {player}: {e}")
@@ -2248,7 +2629,7 @@ class GameState:
                             f"Enabled chat using mod command: {cmd}")
                         self.chat_disabled = False
                         return
-                except:
+                except BaseException:
                     pass
 
             # Remove players from their isolated teams
@@ -2262,7 +2643,7 @@ class GameState:
                     # Remove the team
                     team_name = f"{base_team_name}{player}"
                     self.rcon.execute(f"team remove {team_name}")
-                except:
+                except BaseException:
                     pass  # Team might not exist, ignore
 
             self.logger.info("Chat re-enabled (teams removed)")
@@ -2273,9 +2654,16 @@ class GameState:
 
     def _end_game(self, winner: str, reason: str):
         """End the game"""
+        self.logger.info(
+            f"_end_game called with winner={winner}, reason={reason}, current_status={self.status}")
+        if self.status != GameStatus.IN_PROGRESS:
+            self.logger.warning(
+                f"Game is not in progress (status={self.status}), ignoring end game call")
+            return
         self.status = GameStatus.ENDED
         self.monitor_running = False
         self.tracking_running = False
+        self.logger.info(f"Game status set to ENDED, threads stopped")
 
         # Get all online players
         players = self.rcon.get_online_players()
@@ -2284,7 +2672,13 @@ class GameState:
         self._teleport_players_to_spawn(players, spacing=10.0)
 
         # Announce winners FIRST so players can see the message
+        self.logger.info(
+            f"Announcing game end: winner={winner}, reason={reason}")
         self.notifications.announce_game_end(winner, reason)
+        self.logger.info("Game end announcement sent to players")
+
+        # Wait a moment for the title to display
+        time.sleep(2)
 
         # Reveal roles
         self.notifications.tellraw_all("§6=== ROLE REVEAL ===", "gold")
@@ -2298,9 +2692,21 @@ class GameState:
 
         self.logger.info(f"Game ended: {winner} won - {reason}")
 
-        # Delay before cleanup so players can see the win message (10 seconds)
-        def cleanup_after_delay():
-            time.sleep(10)
+        # Wait before cleanup so players can see the win message and role reveal
+        delay_seconds = self.config.get("end_game_delay_seconds", 10)
+        self.logger.info(
+            f"Waiting {delay_seconds} seconds before cleanup...")
+        self.notifications.tellraw_all(
+            f"§7Cleanup will begin in {delay_seconds} seconds...", "gray")
+        time.sleep(delay_seconds)
+
+        def cleanup_then_delay():
+            # Clear all inventories using @a selector
+            try:
+                self.rcon.execute("clear @a")
+                self.logger.info("Cleared all inventories")
+            except Exception as e:
+                self.logger.warning(f"Could not clear inventories: {e}")
 
             # Get fresh player list
             current_players = self.rcon.get_online_players()
@@ -2323,7 +2729,7 @@ class GameState:
             # Restore original skins
             self.skin_manager.restore_original_skins()
 
-            # Restore gamemodes for all players (including spectators)
+            # Restore gamemodes for all players
             self._restore_gamemodes()
 
             # Re-enable chat
@@ -2332,20 +2738,38 @@ class GameState:
             # Reset world border
             self._reset_world_border()
 
-            # Clean up death scoreboard if it exists
-            if self.config.get("set_dead_to_spectator", False):
+            # Restore PvP state
+            if self.original_pvp_state is not None:
                 try:
-                    self.rcon.execute("scoreboard objectives remove deaths")
-                except Exception:
-                    pass  # Scoreboard might not exist, ignore error
+                    self.rcon.execute(
+                        f"gamerule pvp {str(self.original_pvp_state).lower()}")
+                    self.logger.info(
+                        f"Restored PvP to {self.original_pvp_state}")
+                except Exception as e:
+                    self.logger.warning(f"Error restoring PvP: {e}")
 
-        # Run cleanup in a separate thread after delay
+            # Force all players out of spectator mode and set to survival
+            current_players = self.rcon.get_online_players()
+            for player in current_players:
+                try:
+                    self.rcon.execute(f"gamemode survival {player}")
+                    self.logger.debug(f"Set {player} to survival mode")
+                except Exception as e:
+                    self.logger.warning(
+                        f"Could not set {player} to survival: {e}")
+
+            # Reset health and hunger for all players
+            self._reset_health_and_hunger()
+
+            self.logger.info("Cleanup complete.")
+
+        # Run cleanup then delay in a separate thread
         cleanup_thread = threading.Thread(
-            target=cleanup_after_delay, daemon=True)
+            target=cleanup_then_delay, daemon=True)
         cleanup_thread.start()
 
-        # Reset after a delay (30 seconds total: 10 for cleanup delay + 20 more)
-        threading.Timer(30.0, self._reset_game).start()
+        # Reset after a delay (delay_seconds + 20 more seconds)
+        threading.Timer(delay_seconds + 20.0, self._reset_game).start()
 
     def _reset_game(self):
         """Reset game state"""
@@ -2361,7 +2785,9 @@ def main():
 
     parser = argparse.ArgumentParser(description="Mole Hunt Game Manager")
     parser.add_argument(
-        "--config", default="config/mole_hunt_config.json", help="Path to config file")
+        "--config",
+        default="config/mole_hunt_config.json",
+        help="Path to config file")
     parser.add_argument("--start", action="store_true",
                         help="Start a new game")
     parser.add_argument("--stop", action="store_true",
@@ -2372,10 +2798,17 @@ def main():
                         help="Test mode: assign specific role to a player")
     parser.add_argument("--test-player", type=str,
                         help="Player username for test mode")
-    parser.add_argument("--test-role", type=str, choices=["traitor", "innocent"],
-                        help="Role to assign in test mode (traitor or innocent)")
-    parser.add_argument("--spawn-simulated-player", action="store_true",
-                        help="Spawn a simulated player entity for testing (test mode only)")
+    parser.add_argument(
+        "--test-role",
+        type=str,
+        choices=[
+            "traitor",
+            "innocent"],
+        help="Role to assign in test mode (traitor or innocent)")
+    parser.add_argument(
+        "--spawn-simulated-player",
+        action="store_true",
+        help="Spawn a simulated player entity for testing (test mode only)")
 
     args = parser.parse_args()
 
@@ -2406,7 +2839,11 @@ def main():
             return
 
         spawn_simulated = args.spawn_simulated_player if test_mode else False
-        if game.start_game(test_mode=test_mode, test_player=test_player, test_role=test_role, spawn_simulated_player=spawn_simulated):
+        if game.start_game(
+                test_mode=test_mode,
+                test_player=test_player,
+                test_role=test_role,
+                spawn_simulated_player=spawn_simulated):
             mode_str = f" (TEST MODE: {test_player} as {test_role.value})" if test_mode else ""
             if spawn_simulated:
                 mode_str += " [Simulated Player Spawned]"
@@ -2417,7 +2854,8 @@ def main():
                     try:
                         time.sleep(1)
                     except MCRconException:
-                        # Ignore timeout errors during sleep - connection will be re-established when needed
+                        # Ignore timeout errors during sleep - connection will
+                        # be re-established when needed
                         pass
             except KeyboardInterrupt:
                 print("\nStopping game...")

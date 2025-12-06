@@ -1,0 +1,18 @@
+{
+  "enabled": true,
+  "deathMessage": {
+    "enabled": true,
+    "message": "%death_message%"
+  },
+  "inventoryDrop": true,
+  "consoleLogs": false,
+  "uhcMode": false,
+  "titleSubtitle": {
+    "enabled": false,
+    "title": "&cYou have died",
+    "subtitle": "&7You are now in spectator mode",
+    "fadeIn": 2,
+    "duration": 4,
+    "fadeOut": 2
+  }
+}
