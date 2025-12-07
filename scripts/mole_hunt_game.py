@@ -47,199 +47,251 @@ class RCONClient:
         self.host = host
         self.port = port
         self.password = password
-        self.connection = None
         self.logger = logging.getLogger(__name__)
 
-        # Queue for RCON commands from threads (since mcrcon uses signals that
-        # don't work in threads)
+        # Queue for RCON commands from threads
         self.command_queue = None
-        self.response_queue = None
         self.worker_thread = None
         self.worker_running = False
         self._init_worker()
 
     def _init_worker(self):
-        """Initialize worker thread for executing RCON commands from threads"""
+        """Initialize worker thread that manages a persistent subprocess for RCON commands"""
         import queue
+        import concurrent.futures
 
-        # Only create worker if we're in the main thread
-        if threading.current_thread() is threading.main_thread():
-            self.command_queue = queue.Queue()
-            self.response_queue = queue.Queue()
-            self.worker_running = True
+        # If worker already exists, do nothing
+        if getattr(self, "worker_thread", None) and self.worker_thread.is_alive():
+            return
 
-            def worker():
-                """Worker thread that executes RCON commands (runs in main interpreter)"""
-                worker_connection = None
+        # Queues and state
+        self.command_queue = queue.Queue()
+        # We'll store (command: str, future: Future) tuples in the queue
+        self.worker_running = True
+
+        def worker():
+            """Worker thread that manages a persistent subprocess for RCON commands"""
+            # Create a persistent subprocess that runs MCRcon in the main thread
+            # This subprocess reads commands from stdin and writes responses to stdout
+            worker_script = f"""
+import sys
+import json
+from mcrcon import MCRcon
+
+host = {repr(self.host)}
+password = {repr(self.password)}
+port = {self.port}
+
+# Connect once
+rcon = MCRcon(host, password, port=port)
+rcon.connect()
+
+# Read commands from stdin, execute, write to stdout
+try:
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        if line == "__EXIT__":
+            break
+        try:
+            response = rcon.command(line)
+            # Send response as JSON to handle newlines properly
+            print(json.dumps({{"status": "ok", "response": response}}), flush=True)
+        except Exception as e:
+            print(json.dumps({{"status": "error", "error": str(e)}}), flush=True)
+finally:
+    try:
+        rcon.disconnect()
+    except:
+        pass
+"""
+            proc = None
+            try:
+                proc = subprocess.Popen(
+                    [sys.executable, '-c', worker_script],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1
+                )
+                self.logger.info(
+                    f"RCON worker subprocess started for {self.host}:{self.port}")
+
                 while self.worker_running:
                     try:
-                        # Get command from queue (with timeout to allow
-                        # checking worker_running)
                         try:
                             command, future = self.command_queue.get(
                                 timeout=0.1)
                         except queue.Empty:
+                            # Check if subprocess is still alive
+                            if proc and proc.poll() is not None:
+                                # Subprocess died, try to restart
+                                self.logger.warning(
+                                    "RCON subprocess died, restarting...")
+                                try:
+                                    proc.terminate()
+                                    proc.wait(timeout=1)
+                                except:
+                                    pass
+                                proc = subprocess.Popen(
+                                    [sys.executable, '-c', worker_script],
+                                    stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE,
+                                    text=True,
+                                    bufsize=1
+                                )
+                                self.logger.info(
+                                    "RCON worker subprocess restarted")
                             continue
 
-                        # Execute command using main-thread connection
+                        # Sentinel to stop worker
+                        if command is None:
+                            if proc:
+                                try:
+                                    proc.stdin.write("__EXIT__\n")
+                                    proc.stdin.flush()
+                                    proc.wait(timeout=2)
+                                except:
+                                    try:
+                                        proc.terminate()
+                                        proc.wait(timeout=1)
+                                    except:
+                                        pass
+                            if not future.done():
+                                future.set_result(None)
+                            break
+
+                        if proc is None or proc.poll() is not None:
+                            if not future.done():
+                                future.set_exception(RuntimeError(
+                                    "RCON subprocess unavailable"))
+                            continue
+
+                        # Send command to subprocess
                         try:
-                            if not worker_connection:
-                                worker_connection = MCRcon(
-                                    self.host, self.password, port=self.port)
-                                worker_connection.connect()
+                            proc.stdin.write(command + "\n")
+                            proc.stdin.flush()
+                        except Exception as e:
+                            self.logger.error(
+                                f"Error sending command to subprocess: {e}")
+                            if not future.done():
+                                future.set_exception(RuntimeError(
+                                    f"Failed to send command: {e}"))
+                            continue
 
-                            response = worker_connection.command(command)
-                            future.set_result(response)
-                        except Exception:
-                            # Connection might be broken, try to reconnect
-                            try:
-                                if worker_connection:
-                                    worker_connection.disconnect()
-                            except Exception:
-                                pass
-                            worker_connection = None
+                        # Read response from subprocess
+                        try:
+                            response_line = proc.stdout.readline()
+                            if not response_line:
+                                raise RuntimeError("Subprocess closed stdout")
+                            result = json.loads(response_line.strip())
+                            if result.get("status") == "ok":
+                                response = result.get("response", "")
+                                self.logger.debug(
+                                    f"RCON CMD: {command} -> {repr(response)}")
+                                if not future.done():
+                                    future.set_result(response)
+                            else:
+                                error = result.get("error", "Unknown error")
+                                self.logger.error(
+                                    f"RCON command error: {error}")
+                                if not future.done():
+                                    future.set_exception(
+                                        RuntimeError(f"RCON error: {error}"))
+                        except json.JSONDecodeError as e:
+                            self.logger.error(
+                                f"Failed to parse subprocess response: {e}")
+                            if not future.done():
+                                future.set_exception(RuntimeError(
+                                    f"Invalid response format: {e}"))
+                        except Exception as e:
+                            self.logger.error(
+                                f"Error reading from subprocess: {e}")
+                            if not future.done():
+                                future.set_exception(RuntimeError(
+                                    f"Failed to read response: {e}"))
 
-                            # Retry once with fresh connection
-                            try:
-                                worker_connection = MCRcon(
-                                    self.host, self.password, port=self.port)
-                                worker_connection.connect()
-                                response = worker_connection.command(command)
-                                future.set_result(response)
-                            except Exception as retry_e:
-                                future.set_exception(retry_e)
                     except Exception as e:
-                        self.logger.error(f"Error in RCON worker thread: {e}")
+                        self.logger.error(
+                            f"RCON worker loop error: {e}", exc_info=True)
 
-            self.worker_thread = threading.Thread(target=worker, daemon=True)
-            self.worker_thread.start()
+            finally:
+                if proc:
+                    try:
+                        proc.stdin.write("__EXIT__\n")
+                        proc.stdin.flush()
+                        proc.wait(timeout=2)
+                    except:
+                        try:
+                            proc.terminate()
+                            proc.wait(timeout=1)
+                        except:
+                            pass
+                self.logger.info("RCON worker thread exiting")
+
+        self.worker_thread = threading.Thread(target=worker, daemon=False)
+        self.worker_thread.start()
 
     def connect(self) -> bool:
-        """Connect to RCON server"""
-        is_main_thread = threading.current_thread() is threading.main_thread()
-
-        # Try to connect - even in threads, we'll attempt it
-        # If it fails due to signals, we'll handle it gracefully
+        """Test RCON connectivity by executing a simple command via the worker."""
+        # Ensure worker is running
+        self._init_worker()
         try:
-            # Disconnect old connection if it exists
-            if self.connection:
-                try:
-                    self.connection.disconnect()
-                except BaseException:
-                    pass
-                self.connection = None
-
-            # Create new connection
-            self.connection = MCRcon(self.host, self.password, port=self.port)
-            self.connection.connect()
-            if is_main_thread:
+            # 'list' is a safe test command
+            response = self.execute("list")
+            if response is not None:
                 self.logger.info(
                     f"Connected to RCON at {self.host}:{self.port}")
+                return True
             else:
-                self.logger.info(
-                    f"Connected to RCON in thread at {self.host}:{self.port}")
-            return True
+                self.logger.error("RCON 'list' command returned no response")
+                return False
         except Exception as e:
-            if is_main_thread:
-                self.logger.error(f"Failed to connect to RCON: {e}")
-            else:
-                self.logger.debug(f"Failed to connect to RCON in thread: {e}")
-            self.connection = None
+            self.logger.error(f"Failed to connect to RCON: {e}")
             return False
 
     def disconnect(self):
-        """Disconnect from RCON server"""
-        if self.connection:
-            try:
-                self.connection.disconnect()
-            except Exception:
-                pass
-            self.connection = None
+        """Disconnect from RCON server and stop worker thread"""
+        try:
+            self.worker_running = False
+            if getattr(self, "command_queue", None) is not None:
+                import concurrent.futures
+                sentinel_future: "concurrent.futures.Future[Optional[str]]" = concurrent.futures.Future(
+                )
+                # Send sentinel (None, future) to make worker exit cleanly
+                self.command_queue.put((None, sentinel_future))
+        except Exception:
+            pass
 
     def execute(self, command: str, retry: bool = True) -> Optional[str]:
-        """Execute a command via RCON with automatic reconnection on failure"""
-        is_main_thread = threading.current_thread() is threading.main_thread()
+        """Execute a command via a single RCON worker thread with automatic reconnection.
 
-        # If we're in a thread, use subprocess to run RCON in a separate process
-        # (mcrcon uses signals which don't work in threads)
-        if not is_main_thread:
-            try:
-                # Run RCON command in a subprocess (separate Python process =
-                # can use signals)
-                script = f"""
-import sys
-from mcrcon import MCRcon
-rcon = MCRcon('{self.host}', '{self.password}', port={self.port})
-rcon.connect()
-response = rcon.command({repr(command)})
-rcon.disconnect()
-print(response, end='')
-"""
-                result = subprocess.run(
-                    [sys.executable, '-c', script],
-                    capture_output=True,
-                    text=True,
-                    timeout=5.0
-                )
-                if result.returncode == 0:
-                    response = result.stdout
-                    self.logger.debug(
-                        f"Command (via subprocess): {command} -> Response: {repr(response)}")
-                    return response
-                else:
-                    self.logger.error(
-                        f"Subprocess RCON failed: {result.stderr}")
-                    return None
-            except subprocess.TimeoutExpired:
-                self.logger.error(f"RCON command '{command}' timed out")
-                return None
-            except Exception as e:
-                self.logger.error(
-                    f"Error executing command '{command}' via subprocess: {e}")
-                return None
+        All threads enqueue commands into a queue; the worker thread owns the MCRcon connection.
+        """
+        import concurrent.futures
 
-        # Main thread execution (direct connection)
-        max_retries = 2 if retry else 1
+        # Ensure worker exists
+        if not getattr(self, "worker_thread", None) or not self.worker_thread.is_alive():
+            self._init_worker()
 
-        for attempt in range(max_retries):
-            # Ensure we have a connection
-            if not self.connection:
-                if not self.connect():
-                    if attempt < max_retries - 1:
-                        time.sleep(0.5)  # Brief delay before retry
-                        continue
-                    return None
+        future: "concurrent.futures.Future[Optional[str]]" = concurrent.futures.Future(
+        )
+        # Put (command, future) into the queue; worker will fill the future
+        self.command_queue.put((command, future))
 
-            try:
-                response = self.connection.command(command)
-                self.logger.debug(
-                    f"Command: {command} -> Response: {response}")
-                return response
-            except Exception as e:
-                self.logger.error(
-                    f"Error executing command '{command}' (attempt {attempt + 1}/{max_retries}): {e}")
-
-                # Mark connection as broken
-                try:
-                    if self.connection:
-                        try:
-                            self.connection.disconnect()
-                        except Exception:
-                            pass
-                    self.connection = None
-                except Exception:
-                    pass
-
-                # Retry if we have attempts left
-                if attempt < max_retries - 1 and retry:
-                    self.logger.debug(
-                        f"Retrying RCON command after connection failure...")
-                    time.sleep(0.5)  # Brief delay before retry
-                    continue
-
-                return None
-
-        return None
+        try:
+            # Timeout to avoid hanging forever on a bad connection
+            response = future.result(timeout=5.0)
+            return response
+        except concurrent.futures.TimeoutError:
+            self.logger.error(f"RCON command timed out: {command}")
+            return None
+        except Exception as e:
+            self.logger.error(f"RCON command failed: {command} ({e})")
+            return None
 
     def get_online_players(self) -> List[str]:
         """Get list of online players"""
@@ -381,8 +433,18 @@ class NotificationSystem:
 
     def tellraw_all(self, message: str, color: str = "white"):
         """Send tellraw message to all players"""
-        json_msg = json.dumps({"text": message, "color": color})
-        self.rcon.execute(f'tellraw @a {json_msg}')
+        try:
+            json_msg = json.dumps({"text": message, "color": color})
+            response = self.rcon.execute(f'tellraw @a {json_msg}')
+            if response:
+                # Log if there's an error response
+                if "error" in response.lower() or "unknown" in response.lower():
+                    self.logger.warning(
+                        f"tellraw_all got response: {response}")
+            self.logger.debug(f"tellraw_all: {message[:50]}... -> {response}")
+        except Exception as e:
+            self.logger.error(f"Error in tellraw_all: {e}", exc_info=True)
+            raise
 
     def title(
             self,
@@ -408,11 +470,24 @@ class NotificationSystem:
             stay: int = 70,
             fade_out: int = 20):
         """Send title to all players"""
-        self.rcon.execute(f'title @a times {fade_in} {stay} {fade_out}')
-        self.rcon.execute(f'title @a title {json.dumps({"text": title})}')
-        if subtitle:
-            self.rcon.execute(
-                f'title @a subtitle {json.dumps({"text": subtitle})}')
+        try:
+            response1 = self.rcon.execute(
+                f'title @a times {fade_in} {stay} {fade_out}')
+            if response1 and ("error" in response1.lower() or "unknown" in response1.lower()):
+                logging.warning(f"title_all times got response: {response1}")
+            response2 = self.rcon.execute(
+                f'title @a title {json.dumps({"text": title})}')
+            if response2 and ("error" in response2.lower() or "unknown" in response2.lower()):
+                logging.warning(f"title_all title got response: {response2}")
+            if subtitle:
+                response3 = self.rcon.execute(
+                    f'title @a subtitle {json.dumps({"text": subtitle})}')
+                if response3 and ("error" in response3.lower() or "unknown" in response3.lower()):
+                    logging.warning(
+                        f"title_all subtitle got response: {response3}")
+        except Exception as e:
+            logging.error(f"Error in title_all: {e}", exc_info=True)
+            raise
 
     def announce_role(self, player: str, role: Role):
         """Announce player's role"""
@@ -448,38 +523,49 @@ class NotificationSystem:
 
     def announce_game_end(self, winners: str, reason: str):
         """Announce game end"""
-        # Show prominent title screen (longer display time)
-        if winners.lower() == "traitors":
-            title_color = "§4"
-            subtitle_color = "§c"
-            subtitle_text = f"{subtitle_color}{winners.upper()} WON!"
-        elif winners.lower() == "draw":
-            title_color = "§6"
-            subtitle_color = "§e"
-            subtitle_text = f"{subtitle_color}DRAW!"
-        else:
-            title_color = "§a"
-            subtitle_color = "§2"
-            subtitle_text = f"{subtitle_color}{winners.upper()} WON!"
+        self.logger.info(
+            f"announce_game_end called with winners={winners}, reason={reason}")
+        try:
+            # Show prominent title screen (longer display time)
+            if winners.lower() == "traitors":
+                title_color = "§4"
+                subtitle_color = "§c"
+                subtitle_text = f"{subtitle_color}{winners.upper()} WON!"
+            elif winners.lower() == "draw":
+                title_color = "§6"
+                subtitle_color = "§e"
+                subtitle_text = f"{subtitle_color}DRAW!"
+            else:
+                title_color = "§a"
+                subtitle_color = "§2"
+                subtitle_text = f"{subtitle_color}{winners.upper()} WON!"
 
-        # Send multiple messages to ensure visibility
-        self.tellraw_all("§6" + "="*50, "gold")
-        self.tellraw_all("§6=== MOLE HUNT GAME ENDED ===", "gold")
-        self.tellraw_all("§6" + "="*50, "gold")
-        self.tellraw_all("", "white")  # Blank line for spacing
+            # Send multiple messages to ensure visibility
+            self.logger.info("Sending game end tellraw messages")
+            self.tellraw_all("§6" + "="*50, "gold")
+            self.tellraw_all("§6=== MOLE HUNT GAME ENDED ===", "gold")
+            self.tellraw_all("§6" + "="*50, "gold")
+            self.tellraw_all("", "white")  # Blank line for spacing
 
-        self.title_all(
-            f"{title_color}GAME OVER",
-            subtitle_text,
-            10, 140, 20
-        )
+            self.logger.info("Sending game end title")
+            self.title_all(
+                f"{title_color}GAME OVER",
+                subtitle_text,
+                10, 140, 20
+            )
 
-        # Show winner and reason prominently - ALWAYS send both
-        self.tellraw_all(f"§e§lWINNERS: §r§6{winners}", "yellow")
-        # Always send reason (use provided reason or default)
-        reason_text = reason if reason else "Game ended"
-        self.tellraw_all(f"§e§lREASON: §r§6{reason_text}", "yellow")
-        self.tellraw_all("", "white")  # Blank line for spacing
+            # Show winner and reason prominently - ALWAYS send both
+            self.logger.info("Sending winner and reason messages")
+            self.tellraw_all(f"§e§lWINNERS: §r§6{winners}", "yellow")
+            # Always send reason (use provided reason or default)
+            reason_text = reason if reason else "Game ended"
+            self.tellraw_all(f"§e§lREASON: §r§6{reason_text}", "yellow")
+            self.tellraw_all("", "white")  # Blank line for spacing
+            self.logger.info("announce_game_end completed successfully")
+        except Exception as e:
+            self.logger.error(
+                f"Error in announce_game_end: {e}", exc_info=True)
+            raise
 
     def send_time_update(
             self,
@@ -819,6 +905,9 @@ class GameState:
         self.monitor_running = False
         self.tracking_thread: Optional[threading.Thread] = None
         self.tracking_running = False
+        self.cleanup_thread: Optional[threading.Thread] = None
+        self._end_game_lock = threading.Lock()
+        self._game_ended_announced = False
 
         # Track alive players
         self.alive_players: set = set()
@@ -1178,7 +1267,26 @@ class GameState:
             f"Initialized player tracking (tracking {len(players)} players)")
 
         # Perform countdown (prevents movement/block breaking)
-        if not self._countdown_and_start(players, countdown_seconds=10):
+        # Skip countdown in test mode
+        if test_mode:
+            self.logger.info("Test mode: Skipping countdown")
+            # Still do basic setup (welcome screen, time/weather)
+            self._show_welcome_screen(players)
+            try:
+                self.rcon.execute("time set day")
+                self.rcon.execute("weather clear")
+                self.logger.info("Set time to day and weather to clear")
+            except Exception as e:
+                self.logger.warning(f"Could not set time/weather: {e}")
+            # Ensure players are in survival mode and clear any effects
+            for player in players:
+                try:
+                    self.rcon.execute(f"effect clear {player}")
+                    self.rcon.execute(f"gamemode survival {player}")
+                except Exception as e:
+                    self.logger.warning(
+                        f"Could not set {player} to survival/clear effects: {e}")
+        elif not self._countdown_and_start(players, countdown_seconds=10):
             # Countdown was cancelled
             self.status = GameStatus.NOT_STARTED
             return False
@@ -1253,7 +1361,7 @@ class GameState:
             self.status = GameStatus.IN_PROGRESS
             self.monitor_running = True
             self.monitor_thread = threading.Thread(
-                target=self._monitor_game, daemon=True)
+                target=self._monitor_game, daemon=False)
             self.monitor_thread.start()
 
             # Start player tracking thread (if enabled and not using mod)
@@ -1843,14 +1951,14 @@ class GameState:
                     last_time_update = current_time
 
                 # Sleep for a short interval to allow frequent time updates
-                # Use the smaller of time_update_interval or 0.5 seconds for
+                # Use the smaller of time_update_interval or 1.0 seconds for
                 # responsive checking
-                sleep_time = min(time_update_interval, 0.5)
+                sleep_time = min(time_update_interval, 1.0)
                 time.sleep(sleep_time)
             except Exception as e:
                 self.logger.error(f"Error in monitor thread: {e}")
                 # Sleep briefly on error, but still allow frequent updates
-                sleep_time = min(time_update_interval, 0.5)
+                sleep_time = min(time_update_interval, 1.0)
                 time.sleep(sleep_time)
 
     def _check_deaths(self):
@@ -1960,21 +2068,36 @@ class GameState:
             self.logger.error(f"Error checking deaths: {e}")
 
     def _restore_gamemodes(self):
-        """Restore all players to their original gamemodes, ensuring no one stays in spectator"""
+        """Restore all players to survival mode (always set to survival at game end)"""
         try:
+            # First, use @a selector to set all players to survival
+            self.logger.info(
+                "Setting all players to survival mode using @a selector")
+            try:
+                response = self.rcon.execute("gamemode survival @a")
+                self.logger.info(f"Gamemode command response: {response}")
+            except Exception as e:
+                self.logger.warning(
+                    f"Could not set all players to survival via @a: {e}")
+
+            # Also set individual players as backup
             online_players = self.rcon.get_online_players()
+            self.logger.info(
+                f"Found {len(online_players)} online players to set to survival")
             for player in online_players:
-                original_gamemode = self.original_gamemodes.get(
-                    player, "survival")
-                # If original was spectator, set to survival instead
-                if original_gamemode == "spectator":
-                    original_gamemode = "survival"
-                # Force set gamemode (this will take them out of spectator if they're in it)
-                self.rcon.execute(f"gamemode {original_gamemode} {player}")
-                self.logger.debug(
-                    f"Restored {player} to {original_gamemode} mode")
+                try:
+                    response = self.rcon.execute(f"gamemode survival {player}")
+                    self.logger.info(
+                        f"Set {player} to survival mode: {response}")
+                except Exception as e:
+                    self.logger.warning(
+                        f"Could not set {player} to survival: {e}")
 
             # Double-check: ensure all players are out of spectator mode
+            time.sleep(1.0)  # Give commands time to process
+            online_players = self.rcon.get_online_players()
+            self.logger.info(
+                f"Verifying gamemodes for {len(online_players)} players")
             for player in online_players:
                 try:
                     response = self.rcon.execute(
@@ -1982,17 +2105,31 @@ class GameState:
                     if response and "No entity" not in response:
                         try:
                             gamemode_id = int(response.split()[-1])
+                            self.logger.info(
+                                f"{player} gamemode ID: {gamemode_id}")
                             if gamemode_id == 3:  # Still in spectator
                                 self.logger.warning(
-                                    f"{player} still in spectator, forcing to survival")
+                                    f"{player} still in spectator (ID=3), forcing to survival")
                                 self.rcon.execute(
                                     f"gamemode survival {player}")
-                        except (ValueError, IndexError):
-                            pass
-                except Exception:
-                    pass
+                                time.sleep(0.3)  # Brief delay between commands
+                        except (ValueError, IndexError) as e:
+                            self.logger.debug(
+                                f"Error parsing gamemode for {player}: {e}")
+                except Exception as e:
+                    self.logger.debug(
+                        f"Error checking gamemode for {player}: {e}")
+
+            # Final attempt: use @a again to ensure everyone is in survival
+            time.sleep(0.5)
+            try:
+                self.rcon.execute("gamemode survival @a")
+                self.logger.info("Final @a survival command executed")
+            except Exception as e:
+                self.logger.warning(f"Final @a survival command failed: {e}")
+
         except Exception as e:
-            self.logger.error(f"Error restoring gamemodes: {e}")
+            self.logger.error(f"Error restoring gamemodes: {e}", exc_info=True)
 
     def _clear_all_inventories(self, players: List[str]):
         """Clear all players' inventories at game start"""
@@ -2654,51 +2791,157 @@ class GameState:
 
     def _end_game(self, winner: str, reason: str):
         """End the game"""
+        # Use a lock to ensure only one thread can execute end game logic
         self.logger.info(
-            f"_end_game called with winner={winner}, reason={reason}, current_status={self.status}")
-        if self.status != GameStatus.IN_PROGRESS:
-            self.logger.warning(
-                f"Game is not in progress (status={self.status}), ignoring end game call")
-            return
-        self.status = GameStatus.ENDED
-        self.monitor_running = False
-        self.tracking_running = False
-        self.logger.info(f"Game status set to ENDED, threads stopped")
+            f"_end_game called (before lock) with winner={winner}, reason={reason}, current_status={self.status}")
+        with self._end_game_lock:
+            self.logger.info(
+                f"_end_game called (inside lock) with winner={winner}, reason={reason}, current_status={self.status}")
 
-        # Get all online players
-        players = self.rcon.get_online_players()
+            # If already announced, skip (regardless of status)
+            if self._game_ended_announced:
+                self.logger.warning(
+                    "Game end already announced, skipping duplicate call")
+                return
 
-        # Teleport all players to spawn and space them out
-        self._teleport_players_to_spawn(players, spacing=10.0)
+            # If status is already ENDED but not announced, we still need to announce
+            # (this handles the case where status was set but announcement failed)
+            # Only skip if status is ENDED AND already announced
+            if self.status == GameStatus.ENDED and self._game_ended_announced:
+                self.logger.warning(
+                    "Status is ENDED and already announced, skipping")
+                return
 
-        # Announce winners FIRST so players can see the message
-        self.logger.info(
-            f"Announcing game end: winner={winner}, reason={reason}")
-        self.notifications.announce_game_end(winner, reason)
-        self.logger.info("Game end announcement sent to players")
+            # Mark as ended first to prevent other threads from proceeding
+            was_in_progress = (self.status == GameStatus.IN_PROGRESS)
+            if not was_in_progress and self.status != GameStatus.ENDED:
+                self.logger.warning(
+                    f"Game was not in progress (status={self.status}), but proceeding anyway")
 
-        # Wait a moment for the title to display
-        time.sleep(2)
+            # Only set status if not already ENDED (to avoid overwriting)
+            if self.status != GameStatus.ENDED:
+                self.status = GameStatus.ENDED
+                self.monitor_running = False
+                self.tracking_running = False
+                self.logger.info(f"Game status set to ENDED, threads stopped")
+            else:
+                self.logger.info(
+                    f"Game status already ENDED, continuing with announcement")
 
-        # Reveal roles
-        self.notifications.tellraw_all("§6=== ROLE REVEAL ===", "gold")
-        traitors = self.role_manager.get_traitors()
-        innocents = self.role_manager.get_innocents()
+            # Get all online players
+            players = self.rcon.get_online_players()
 
-        self.notifications.tellraw_all(
-            f"§4Traitors: §7{', '.join(traitors)}", "red")
-        self.notifications.tellraw_all(
-            f"§aInnocents: §7{', '.join(innocents)}", "green")
+            # Teleport all players to spawn and space them out
+            self._teleport_players_to_spawn(players, spacing=10.0)
 
-        self.logger.info(f"Game ended: {winner} won - {reason}")
+            # Set all players to survival mode immediately after teleport
+            self.logger.info(
+                "Setting all players to survival mode after teleport")
+            try:
+                # Use @a selector for immediate effect
+                self.rcon.execute("gamemode survival @a")
+                self.logger.info("Set all players to survival via @a")
+                # Also set individually as backup
+                for player in players:
+                    try:
+                        self.rcon.execute(f"gamemode survival {player}")
+                        self.logger.info(f"Set {player} to survival mode")
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Could not set {player} to survival: {e}")
+            except Exception as e:
+                self.logger.warning(f"Error setting players to survival: {e}")
 
-        # Wait before cleanup so players can see the win message and role reveal
-        delay_seconds = self.config.get("end_game_delay_seconds", 10)
-        self.logger.info(
-            f"Waiting {delay_seconds} seconds before cleanup...")
-        self.notifications.tellraw_all(
-            f"§7Cleanup will begin in {delay_seconds} seconds...", "gray")
-        time.sleep(delay_seconds)
+            # Wait for commands to process before sending messages
+            self.logger.info(
+                "Waiting 1.5 seconds before sending announcement...")
+            self.logger.info("About to sleep for 1.5 seconds...")
+            try:
+                time.sleep(1.5)
+                self.logger.info("Sleep complete, proceeding to announcement")
+            except Exception as e:
+                self.logger.error(f"Error during sleep: {e}", exc_info=True)
+                # Continue anyway
+
+            # Announce winners so players can see the message
+            self.logger.info("Reached announcement section after sleep")
+            self.logger.info(
+                f"Announcing game end: winner={winner}, reason={reason}")
+            self.logger.info(
+                f"About to call announce_game_end with winner={winner}, reason={reason}")
+            self.logger.info(
+                f"Current _game_ended_announced flag: {self._game_ended_announced}")
+            announcement_sent = False
+            self.logger.info(
+                f"Starting announcement block, announcement_sent={announcement_sent}")
+            self.logger.info(f"About to enter try block for announcement")
+            try:
+                self.logger.info(
+                    "Inside try block, about to call announce_game_end")
+                # Send announcement once
+                self.logger.info(
+                    f"Calling announce_game_end with winner={winner}, reason={reason}")
+                self.logger.info(
+                    f"self.notifications object: {self.notifications}")
+                self.logger.info(
+                    f"announce_game_end method exists: {hasattr(self.notifications, 'announce_game_end')}")
+                self.notifications.announce_game_end(winner, reason)
+                self.logger.info(
+                    "announce_game_end call completed without exception")
+                self.logger.info(
+                    "Game end announcement sent to players")
+                announcement_sent = True
+                self._game_ended_announced = True
+            except Exception as e:
+                self.logger.error(
+                    f"Error sending game end announcement: {e}", exc_info=True)
+                # Try to send at least a simple message if the full announcement fails
+                try:
+                    self.logger.info("Attempting fallback message...")
+                    self.notifications.tellraw_all(
+                        f"§6GAME ENDED: {winner} won - {reason}", "gold")
+                    self.logger.info("Sent fallback game end message")
+                    announcement_sent = True
+                    self._game_ended_announced = True
+                except Exception as e2:
+                    self.logger.error(
+                        f"Even fallback message failed: {e2}", exc_info=True)
+
+            if not announcement_sent:
+                self.logger.error(
+                    "CRITICAL: Game end announcement was NOT sent! Attempting direct RCON commands...")
+                try:
+                    # Try direct RCON commands as last resort
+                    self.rcon.execute(
+                        f'tellraw @a {{"text":"§6GAME ENDED: {winner} won - {reason}","color":"gold"}}')
+                    self.logger.info("Sent direct RCON game end message")
+                    self._game_ended_announced = True
+                except Exception as e3:
+                    self.logger.error(
+                        f"Direct RCON message also failed: {e3}", exc_info=True)
+
+            # Wait a moment for the title to display
+            time.sleep(2)
+
+            # Reveal roles
+            self.notifications.tellraw_all("§6=== ROLE REVEAL ===", "gold")
+            traitors = self.role_manager.get_traitors()
+            innocents = self.role_manager.get_innocents()
+
+            self.notifications.tellraw_all(
+                f"§4Traitors: §7{', '.join(traitors)}", "red")
+            self.notifications.tellraw_all(
+                f"§aInnocents: §7{', '.join(innocents)}", "green")
+
+            self.logger.info(f"Game ended: {winner} won - {reason}")
+
+            # Wait before cleanup so players can see the win message and role reveal
+            delay_seconds = self.config.get("end_game_delay_seconds", 10)
+            self.logger.info(
+                f"Waiting {delay_seconds} seconds before cleanup...")
+            self.notifications.tellraw_all(
+                f"§7Cleanup will begin in {delay_seconds} seconds...", "gray")
+            time.sleep(delay_seconds)
 
         def cleanup_then_delay():
             # Clear all inventories using @a selector
@@ -2729,8 +2972,29 @@ class GameState:
             # Restore original skins
             self.skin_manager.restore_original_skins()
 
-            # Restore gamemodes for all players
-            self._restore_gamemodes()
+            # Gamemodes already set to survival after teleport, but verify here
+            # (gamemodes were set immediately after teleport, so this is just a safety check)
+            try:
+                current_players = self.rcon.get_online_players()
+                for player in current_players:
+                    try:
+                        response = self.rcon.execute(
+                            f"data get entity {player} playerGameType")
+                        if response and "No entity" not in response:
+                            try:
+                                gamemode_id = int(response.split()[-1])
+                                if gamemode_id == 3:  # Still in spectator
+                                    self.logger.warning(
+                                        f"{player} still in spectator during cleanup, forcing survival")
+                                    self.rcon.execute(
+                                        f"gamemode survival {player}")
+                            except (ValueError, IndexError):
+                                pass
+                    except Exception:
+                        pass
+            except Exception as e:
+                self.logger.warning(
+                    f"Error verifying gamemodes during cleanup: {e}")
 
             # Re-enable chat
             self._enable_chat()
@@ -2748,16 +3012,6 @@ class GameState:
                 except Exception as e:
                     self.logger.warning(f"Error restoring PvP: {e}")
 
-            # Force all players out of spectator mode and set to survival
-            current_players = self.rcon.get_online_players()
-            for player in current_players:
-                try:
-                    self.rcon.execute(f"gamemode survival {player}")
-                    self.logger.debug(f"Set {player} to survival mode")
-                except Exception as e:
-                    self.logger.warning(
-                        f"Could not set {player} to survival: {e}")
-
             # Reset health and hunger for all players
             self._reset_health_and_hunger()
 
@@ -2765,8 +3019,9 @@ class GameState:
 
         # Run cleanup then delay in a separate thread
         cleanup_thread = threading.Thread(
-            target=cleanup_then_delay, daemon=True)
+            target=cleanup_then_delay, daemon=False)
         cleanup_thread.start()
+        self.cleanup_thread = cleanup_thread
 
         # Reset after a delay (delay_seconds + 20 more seconds)
         threading.Timer(delay_seconds + 20.0, self._reset_game).start()
@@ -2860,6 +3115,13 @@ def main():
             except KeyboardInterrupt:
                 print("\nStopping game...")
                 game.stop_game()
+
+            # Wait for threads to finish before exiting
+            if getattr(game, "monitor_thread", None):
+                game.monitor_thread.join()
+
+            if getattr(game, "cleanup_thread", None):
+                game.cleanup_thread.join()
         else:
             print("Failed to start game")
     elif args.stop:
