@@ -836,14 +836,21 @@ class WinConditionChecker:
 
         # End game if there are neither traitors nor innocents alive
         # This handles the case where all players have died or edge cases
+        # BUT only if there are still players online (don't end if everyone disconnected)
         if len(alive_traitors) == 0 and len(alive_innocents) == 0:
-            # Only end if roles were actually assigned (game was started)
-            if len(all_traitors) > 0 or len(all_innocents) > 0:
+            # Only end if roles were actually assigned (game was started) AND there are players online
+            if (len(all_traitors) > 0 or len(all_innocents) > 0) and len(alive_players) > 0:
                 self.logger.info(
                     f"Win condition: Game ended - No traitors or innocents alive "
                     f"(alive traitors: {len(alive_traitors)}, alive innocents: {len(alive_innocents)}, "
-                    f"total traitors assigned: {len(all_traitors)}, total innocents assigned: {len(all_innocents)})")
+                    f"total traitors assigned: {len(all_traitors)}, total innocents assigned: {len(all_innocents)}, "
+                    f"online players: {len(alive_players)})")
                 return ("Draw", "No players remaining")
+            elif len(alive_players) == 0:
+                self.logger.debug(
+                    f"No players online - not ending game (alive traitors: {len(alive_traitors)}, "
+                    f"alive innocents: {len(alive_innocents)}, online players: {len(alive_players)})")
+                return None
 
         # Traitors win if all innocents are eliminated
         # Check: no alive innocents AND there were innocents assigned at game start AND there were traitors assigned
@@ -2431,7 +2438,7 @@ class GameState:
             self,
             players: List[str],
             spacing: float = 10.0):
-        """Teleport all players to spawn and space them out within the specified distance"""
+        """Teleport all players to the exact spawn location"""
         try:
             # Get spawn coordinates from config, or try to get world spawn
             spawn_config = self.config.get("spawn_point", {})
@@ -2487,29 +2494,11 @@ class GameState:
                 self.logger.info(
                     f"Using configured spawn point: {spawn_x}, {spawn_y}, {spawn_z}")
 
-            # Space players out evenly in a circle within the specified spacing
-            # distance
+            # Teleport all players to the exact same spawn location
             num_players = len(players)
             for i, player in enumerate(players):
-                if num_players == 1:
-                    # Single player: place at spawn
-                    x, y, z = spawn_x, spawn_y, spawn_z
-                else:
-                    # Calculate angle for circular spacing (evenly distributed
-                    # around circle)
-                    angle = (2 * math.pi * i) / num_players
-                    # Distribute players evenly within the spacing radius
-                    # Use spacing as the maximum radius, ensuring all players are within 10 blocks
-                    # For better distribution, spread them across the full radius
-                    # Maximum distance from spawn (10 blocks)
-                    max_radius = spacing
-                    # Distribute evenly from center to edge
-                    distance = max_radius * (i / (num_players - 1))
-
-                    # Calculate position
-                    x = spawn_x + distance * math.cos(angle)
-                    y = spawn_y
-                    z = spawn_z + distance * math.sin(angle)
+                # All players go to the exact same spawn location
+                x, y, z = spawn_x, spawn_y, spawn_z
 
                 # Teleport player
                 try:
@@ -2519,7 +2508,7 @@ class GameState:
                     self.logger.warning(f"Could not teleport {player}: {e}")
 
             self.logger.info(
-                f"Teleported {num_players} player(s) to spawn and spaced them out")
+                f"Teleported {num_players} player(s) to spawn")
         except Exception as e:
             self.logger.warning(f"Error teleporting players to spawn: {e}")
 
