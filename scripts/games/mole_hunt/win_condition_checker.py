@@ -3,11 +3,12 @@ Win condition checker for Mole Hunt game
 """
 
 import logging
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 from game_engine.rcon_client import RCONClient
 from game_engine.timer_manager import TimerManager
 from .role_manager import RoleManager
+from .dragon_detection import has_any_player_killed_dragon
 
 
 class WinConditionChecker:
@@ -17,11 +18,15 @@ class WinConditionChecker:
             self,
             role_manager: RoleManager,
             timer_manager: TimerManager,
-            rcon_client: RCONClient):
+            rcon_client: RCONClient,
+            config: Optional[dict] = None):
         self.role_manager = role_manager
         self.timer_manager = timer_manager
         self.rcon = rcon_client
+        self.config = config or {}
         self.logger = logging.getLogger(__name__)
+        self.ender_dragon_enabled = self.config.get(
+            "win_conditions", {}).get("ender_dragon_enabled", False)
 
     def check_win_conditions(
             self, alive_players: Optional[set] = None) -> Optional[Tuple[str, str]]:
@@ -68,6 +73,23 @@ class WinConditionChecker:
                     f"alive innocents: {len(alive_innocents)}, online players: {len(alive_players)})")
                 return None
 
+        # Check ender dragon win condition if enabled
+        if self.ender_dragon_enabled:
+            dragon_killed = has_any_player_killed_dragon(self.rcon.execute)
+            self.logger.info(f"Ender dragon killed check: {dragon_killed}") 
+
+            if dragon_killed:
+                # Innocents always win if the dragon is killed, regardless of who killed it
+                self.logger.info(
+                    "Win condition: Innocents win - Ender Dragon defeated")
+                return ("Innocents", "Ender Dragon defeated")
+
+            # If timer expires and dragon not killed, traitors win (innocents lose)
+            if self.timer_manager.is_expired() and not dragon_killed:
+                self.logger.info(
+                    "Win condition: Traitors win - Time limit reached without killing Ender Dragon")
+                return ("Traitors", "Time limit reached - Ender Dragon not defeated")
+
         # Traitors win if all innocents are eliminated
         # Check: no alive innocents AND there were innocents assigned at game start AND there were traitors assigned
         # Also ensure we're not in a degenerate case (e.g., only 1 innocent
@@ -82,8 +104,8 @@ class WinConditionChecker:
                 f"total traitors assigned: {len(all_traitors)})")
             return ("Traitors", "All innocent players eliminated")
 
-        # Innocents win if timer expires and at least one innocent survives
-        if self.timer_manager.is_expired() and len(alive_innocents) > 0:
+        # Innocents win if timer expires and at least one innocent survives (only if ender dragon not enabled)
+        if not self.ender_dragon_enabled and self.timer_manager.is_expired() and len(alive_innocents) > 0:
             return ("Innocents", "Time limit reached")
 
         # If all traitors are eliminated, innocents win
@@ -96,4 +118,3 @@ class WinConditionChecker:
             return ("Innocents", "All traitors eliminated")
 
         return None
-

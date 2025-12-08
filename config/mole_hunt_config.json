@@ -22,7 +22,8 @@
   },
   "win_conditions": {
     "traitors_win": "eliminate_all_innocents",
-    "innocents_win": "survive_time_limit"
+    "innocents_win": "survive_time_limit",
+    "ender_dragon_enabled": true
   },
   "spawn_point": {
     "x": -124,

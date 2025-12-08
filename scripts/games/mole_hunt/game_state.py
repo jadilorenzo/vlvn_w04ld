@@ -51,7 +51,7 @@ class MoleHuntGameState:
         self.abilities = TraitorAbilities(self.rcon, self.config)
         self.skin_manager = SkinManager(self.rcon, self.config)
         self.win_checker = WinConditionChecker(
-            self.role_manager, self.timer_manager, self.rcon)
+            self.role_manager, self.timer_manager, self.rcon, self.config)
 
         self.status = GameStatus.NOT_STARTED
         self.monitor_thread: Optional[threading.Thread] = None
@@ -403,6 +403,12 @@ class MoleHuntGameState:
 
             self.death_counts[player] = 0
 
+        # Set up ender dragon kill tracking if enabled (must be done before game starts)
+        if self.config.get("win_conditions", {}).get("ender_dragon_enabled", False):
+            from .dragon_detection import clear_dragon_advancement_for_all_players
+            # Clear the advancement for all players at game start (including offline players)
+            clear_dragon_advancement_for_all_players(self.rcon.execute)
+
         if test_mode:
             self._show_welcome_screen(players)
             self._execute_command("time set day")
@@ -470,12 +476,19 @@ class MoleHuntGameState:
         # Always start monitoring thread to check win conditions
         # In test mode with single player, still start monitor if player is innocent (for time updates)
         # Also start if simulated player is spawned (to check win conditions)
+        # Always start if ender dragon win condition is enabled (to detect dragon kills)
+        ender_dragon_enabled = self.config.get(
+            "win_conditions", {}).get("ender_dragon_enabled", False)
         needs_monitoring = not (test_mode and len(players) == 1)
         if test_mode and len(players) == 1:
             if test_role == Role.INNOCENT:
                 needs_monitoring = True  # Innocents need time updates
             elif spawn_simulated_player:
                 needs_monitoring = True  # Need to check win conditions when simulated player dies
+            elif ender_dragon_enabled:
+                needs_monitoring = True  # Need to check for dragon kills
+        elif ender_dragon_enabled:
+            needs_monitoring = True  # Always monitor when dragon win condition is enabled
 
         # Start monitoring thread (always start if simulated player spawned, or
         # if player is innocent)
