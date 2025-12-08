@@ -30,7 +30,7 @@
     "z": -84
   },
   "time_update_interval_seconds": 0.5,
-  "end_game_delay_seconds": 10,
+  "end_game_delay_seconds": 3,
   "pvp_delay_seconds": 30,
   "world_border": {
     "enabled": true,

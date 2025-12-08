@@ -68,6 +68,9 @@ class MoleHuntGameState:
         # player -> timestamp when first detected
         self.pending_deaths: Dict[str, float] = {}
 
+        # Track dead players for voice chat group management
+        self.dead_players: set = set()
+
         self.chat_disabled = False
 
         logging.basicConfig(
@@ -582,6 +585,7 @@ class MoleHuntGameState:
         self.alive_players.clear()
         self.death_counts.clear()
         self.pending_deaths.clear()
+        self.dead_players.clear()
 
         self.notifications.tellraw_all("§7Game stopped by admin", "gray")
         self.logger.info("Game stopped")
@@ -1084,6 +1088,16 @@ class MoleHuntGameState:
 
                                             self.logger.info(
                                                 f"Death confirmed: {player} has been in spectator mode for {time_since_detection:.1f} seconds")
+
+                                            # Unmute the player when they die
+                                            if not is_simulated:
+                                                self._execute_command(
+                                                    f"unmute {player}")
+                                                # Add player to dead voice chat group
+                                                # Execute as the player to join the group
+                                                self._execute_command(
+                                                    f"execute as {player} run voicechat group dead")
+                                                self.dead_players.add(player)
 
                                             # Notify player (skip for simulated players)
                                             if not is_simulated:
@@ -1801,6 +1815,16 @@ class MoleHuntGameState:
             if current_players:
                 self.logger.info(
                     f"Removed resistance effect from {len(current_players)} player(s) at game end")
+
+            # Remove all dead players from voice chat group
+            for player in self.dead_players.copy():
+                # Execute as the player to leave the group
+                self._execute_command(
+                    f"execute as {player} run voicechat leave")
+            if self.dead_players:
+                self.logger.info(
+                    f"Removed {len(self.dead_players)} dead player(s) from voice chat group")
+                self.dead_players.clear()
 
             self._reset_health_and_hunger()
 

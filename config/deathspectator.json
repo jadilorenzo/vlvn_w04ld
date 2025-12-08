@@ -1,5 +1,5 @@
 {
-  "enabled": true,
+  "enabled": false,
   "deathMessage": {
     "enabled": true,
     "message": "%death_message%"
