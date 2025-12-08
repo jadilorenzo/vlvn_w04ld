@@ -9,4 +9,3 @@ class Role(Enum):
     """Player role enumeration"""
     TRAITOR = "traitor"
     INNOCENT = "innocent"
-

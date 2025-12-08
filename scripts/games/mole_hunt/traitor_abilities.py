@@ -56,4 +56,3 @@ class TraitorAbilities:
         # Modern Player Finder is command-based, not item-based, so nothing to
         # remove
         pass
-

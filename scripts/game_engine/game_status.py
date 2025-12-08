@@ -11,4 +11,3 @@ class GameStatus(Enum):
     STARTING = "starting"
     IN_PROGRESS = "in_progress"
     ENDED = "ended"
-

@@ -55,4 +55,3 @@ class RoleManager:
     def reset(self):
         """Reset role assignments"""
         self.roles = {}
-

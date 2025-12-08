@@ -34,11 +34,9 @@ class MoleHuntGameState:
     """Manages overall game state for Mole Hunt game"""
 
     def __init__(self, config_path: str):
-        # Load configuration
         with open(config_path, 'r', encoding='utf-8') as f:
             self.config = json.load(f)
 
-        # Initialize components
         rcon_config = self.config.get("rcon", {})
         self.rcon = RCONClient(
             rcon_config.get("host", "localhost"),
@@ -64,24 +62,14 @@ class MoleHuntGameState:
         self._end_game_lock = threading.Lock()
         self._game_ended_announced = False
 
-        # Track alive players
         self.alive_players: set = set()
-        # Kept for backward compatibility
         self.death_counts: Dict[str, int] = {}
-        self.original_gamemodes: Dict[str, str] = {}
-        self.original_ops: List[str] = []  # Store ops to restore after game
 
-        # Track potential deaths for verification (to avoid false positives)
         # player -> timestamp when first detected
         self.pending_deaths: Dict[str, float] = {}
 
-        # Track chat state
         self.chat_disabled = False
 
-        # Track PvP state
-        self.original_pvp_state = None
-
-        # Setup logging
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -93,6 +81,53 @@ class MoleHuntGameState:
         self.logger = logging.getLogger(__name__)
         self.simulated_player_name = "TestInnocent"
         self.simulated_player_entity = None
+
+    def _execute_command(self, command: str) -> bool:
+        """Execute an RCON command with uniform error handling
+
+        Args:
+            command: The RCON command to execute
+
+        Returns:
+            True if command succeeded, False otherwise
+        """
+        try:
+            self.rcon.execute(command)
+            self.logger.info(f"{command}")
+            return True
+        except Exception as e:
+            self.logger.warning(f"{command} command failed: {e}")
+            self.logger.info(f"{command} command failed: {e}")
+            return False
+
+    def _validate_game_not_in_progress(self) -> bool:
+        """Check if game is already in progress"""
+        if self.status == GameStatus.IN_PROGRESS:
+            self.logger.warning("Game already in progress")
+            return False
+        return True
+
+    def _validate_rcon_connection(self) -> bool:
+        """Validate RCON connection"""
+        if not self.rcon.connect():
+            self.logger.error("Failed to connect to RCON")
+            self.status = GameStatus.NOT_STARTED
+            return False
+        return True
+
+    def _validate_player_count(self, players: List[str], test_mode: bool) -> bool:
+        """Validate player count for game start"""
+        if not test_mode and len(players) < 2:
+            self.logger.error("Need at least 2 players to start")
+            self.status = GameStatus.NOT_STARTED
+            return False
+
+        if test_mode and len(players) < 1:
+            self.logger.error("Need at least 1 player for test mode")
+            self.status = GameStatus.NOT_STARTED
+            return False
+
+        return True
 
     def _spawn_simulated_player(
             self,
@@ -118,37 +153,24 @@ class MoleHuntGameState:
             spawn_pos = (player_pos[0] + distance,
                          player_pos[1], player_pos[2])
 
-            # Check if simulated player already exists and remove it first
             online_players_before = self.rcon.get_online_players()
             for player in online_players_before:
                 if player.lower() == self.simulated_player_name.lower():
-                    self.logger.info(
-                        f"Simulated player '{player}' already exists, removing first...")
                     self.rcon.execute(f"player {player} kill")
                     time.sleep(0.5)
 
-            # Spawn Carpet simulated player at the calculated position
-            # Use execute positioned to spawn at the offset location
-            # Use ~ for world-relative coordinates (not ^ which is
-            # rotation-relative)
+            # Use ~ for world-relative coordinates (not ^ which is rotation-relative)
             spawn_cmd = f"execute at {near_player} positioned ~{distance} ~ ~ run player {self.simulated_player_name} spawn"
-            self.logger.info(f"Executing Carpet spawn command: {spawn_cmd}")
             response = self.rcon.execute(spawn_cmd)
-            self.logger.info(f"Spawn command response: {repr(response)}")
 
-            # Check if spawn was successful
             if response and ("Unknown" not in response.lower(
             ) and "error" not in response.lower() and "does not exist" not in response.lower()):
-                # Wait a moment for the player to spawn
-                # Increased wait time to ensure spawn completes
                 time.sleep(1.0)
 
-                # Verify the player exists and get actual coordinates
                 online_players = self.rcon.get_online_players()
                 self.logger.debug(
                     f"Online players after spawn: {online_players}")
 
-                # Check case-insensitive match
                 actual_player_name = None
                 for player in online_players:
                     if player.lower() == self.simulated_player_name.lower():
@@ -156,14 +178,11 @@ class MoleHuntGameState:
                         break
 
                 if actual_player_name:
-                    # Update simulated_player_name to match the actual spawned player name
-                    # (Carpet might use different case)
+                    # Carpet might use different case
                     self.simulated_player_name = actual_player_name
                     self.logger.info(
                         f"Updated simulated_player_name to match spawned player: '{self.simulated_player_name}'")
 
-                    # Get the ACTUAL coordinates from the game, not the
-                    # calculated position
                     actual_pos = self._get_player_coordinates(
                         actual_player_name)
                     if actual_pos:
@@ -171,29 +190,24 @@ class MoleHuntGameState:
                             f"Spawned Carpet simulated player '{actual_player_name}' at actual position: {actual_pos}")
                         self.logger.info(
                             f"Expected position was: {spawn_pos}, player position: {player_pos}")
-                        # Store None - we'll always get coordinates from the
-                        # game
                         self.simulated_player_entity = None
                     else:
                         self.logger.warning(
                             f"Could not get coordinates for spawned player '{actual_player_name}'")
                         self.simulated_player_entity = None
 
-                    # Add to innocents list for tracking
                     if actual_player_name not in self.role_manager.roles:
                         self.role_manager.roles[actual_player_name] = Role.INNOCENT
                         self.alive_players.add(actual_player_name)
                         self.logger.info(
                             f"Added {actual_player_name} as simulated innocent")
 
-                    # Calculate actual distance
                     if actual_pos and player_pos:
                         actual_distance = self._calculate_distance(
                             player_pos, actual_pos)
                         self.logger.info(
                             f"Actual spawn distance: {actual_distance:.1f}m (requested: {distance}m)")
 
-                    # Notify the test player
                     self.notifications.tellraw(
                         near_player,
                         f"§aCarpet simulated player '{actual_player_name}' spawned!",
@@ -337,133 +351,86 @@ class MoleHuntGameState:
             test_role: Role to assign to test_player (TRAITOR or INNOCENT)
             spawn_simulated_player: If True, spawn a simulated player entity for testing
         """
-        if self.status == GameStatus.IN_PROGRESS:
-            self.logger.warning("Game already in progress")
+        if not self._validate_game_not_in_progress():
             return False
 
         self.status = GameStatus.STARTING
         self.logger.info("Starting new mole hunt game...")
 
-        # Connect to RCON
-        if not self.rcon.connect():
-            self.logger.error("Failed to connect to RCON")
-            self.status = GameStatus.NOT_STARTED
+        if not self._validate_rcon_connection():
             return False
-
-        # Get online players
         players = self.rcon.get_online_players()
-
-        # Test mode allows 1 player, normal mode requires 2+
-        if not test_mode and len(players) < 2:
-            self.logger.error("Need at least 2 players to start")
-            self.status = GameStatus.NOT_STARTED
+        if not self._validate_player_count(players, test_mode):
             return False
 
-        if test_mode and len(players) < 1:
-            self.logger.error("Need at least 1 player for test mode")
-            self.status = GameStatus.NOT_STARTED
-            return False
-
-        # Teleport all players to spawn and space them out
         self._teleport_players_to_spawn(players, spacing=10.0)
 
-        # Reset all players to Steve skin (if enabled)
         if self.config.get("reset_skins_to_steve", False):
             self.skin_manager.reset_all_players(players)
 
-        # Clear all players' inventories
         self._clear_all_inventories(players)
-
-        # Heal all players to full health
         self._heal_all_players(players)
 
-        # Initialize player tracking
-        self.alive_players = set(players)
-        self.death_counts = {}
-        self.original_gamemodes = {}
-
-        # Store original gamemodes and check initial spectator status
+        # Set all players to survival mode
+        self._execute_command("gamemode survival @a")
         for player in players:
-            # Try to get current gamemode
+            self._execute_command(f"gamemode survival {player}")
+
+        # Initialize alive players (check for spectators)
+        self.alive_players = set()
+        self.death_counts = {}
+        for player in players:
             try:
                 response = self.rcon.execute(
                     f"data get entity {player} playerGameType")
                 if response and "No entity" not in response:
                     try:
                         gamemode_id = int(response.split()[-1])
-                        # 0=survival, 1=creative, 2=adventure, 3=spectator
-                        gamemode_map = {
-                            0: "survival", 1: "creative", 2: "adventure", 3: "spectator"}
-                        self.original_gamemodes[player] = gamemode_map.get(
-                            gamemode_id, "survival")
-
-                        # If player is already in spectator, mark as dead
                         if gamemode_id == 3:
-                            self.alive_players.discard(player)
-                            self.logger.info(
-                                f"{player} is already in spectator mode at game start")
+                            pass  # Player is in spectator, don't add to alive
                         else:
-                            # Ensure player is in alive_players if not spectator
                             self.alive_players.add(player)
-                            self.logger.debug(
-                                f"{player} gamemode at start: {gamemode_map.get(gamemode_id, 'unknown')} (id: {gamemode_id})")
                     except (ValueError, IndexError):
-                        self.original_gamemodes[player] = "survival"
+                        self.alive_players.add(player)
                 else:
-                    self.original_gamemodes[player] = "survival"
+                    self.alive_players.add(player)
             except Exception as e:
                 self.logger.debug(f"Could not get gamemode for {player}: {e}")
-                self.original_gamemodes[player] = "survival"
+                self.alive_players.add(player)
 
-            # Keep for backward compatibility
             self.death_counts[player] = 0
 
-        self.logger.info(
-            f"Initialized player tracking (tracking {len(players)} players)")
-
-        # Perform countdown (prevents movement/block breaking)
-        # Skip countdown in test mode
         if test_mode:
-            self.logger.info("Test mode: Skipping countdown")
-            # Still do basic setup (welcome screen, time/weather)
             self._show_welcome_screen(players)
-            try:
-                self.rcon.execute("time set day")
-                self.rcon.execute("weather clear")
-                self.logger.info("Set time to day and weather to clear")
-            except Exception as e:
-                self.logger.warning(f"Could not set time/weather: {e}")
-            # Ensure players are in survival mode and clear any effects
+            self._execute_command("time set day")
+            self._execute_command("weather clear")
+            self._execute_command("gamerule doDaylightCycle true")
+            self._execute_command("deathspectator setconfig enabled true")
+            self.logger.info(
+                "Set time to day, weather to clear, enabled daylight cycle, and enabled death spectator")
             for player in players:
-                try:
-                    self.rcon.execute(f"effect clear {player}")
-                    self.rcon.execute(f"gamemode survival {player}")
-                except Exception as e:
-                    self.logger.warning(
-                        f"Could not set {player} to survival/clear effects: {e}")
+                self._execute_command(f"effect clear {player}")
+                self._execute_command(f"gamemode survival {player}")
         elif not self._countdown_and_start(players, countdown_seconds=10):
-            # Countdown was cancelled
             self.status = GameStatus.NOT_STARTED
             return False
 
-        # Assign roles
         if test_mode and test_player and test_role:
-            # Manual role assignment for testing
             self.role_manager.roles = {}
             for player in players:
                 if player == test_player:
                     self.role_manager.roles[player] = test_role
                 else:
-                    # Assign opposite role to other players if any
                     self.role_manager.roles[player] = Role.INNOCENT if test_role == Role.TRAITOR else Role.TRAITOR
-            self.logger.info(
-                f"Test mode: Assigned {test_player} as {test_role.value}")
         else:
-            # Normal random assignment
             self.role_manager.assign_roles(players)
 
-        # Announce game start
         self.notifications.announce_game_start()
+
+        # Inform players about PvP delay
+        pvp_delay_seconds = self.config.get("pvp_delay_seconds", 60)
+        self.notifications.tellraw_all(
+            f"§cPvP will be enabled in {pvp_delay_seconds} seconds", "red")
 
         # Notify players of their roles
         for player, role in self.role_manager.roles.items():
@@ -481,18 +448,15 @@ class MoleHuntGameState:
                     traitor_list = ', '.join(other_traitors)
                     self.notifications.tellraw(
                         traitor, f"§4[TRAITOR] §7Your fellow traitors: §c{traitor_list}", "red")
-                    self.logger.info(
-                        f"Informed traitor {traitor} of other traitors: {traitor_list}")
 
-        # Remove operator status from all players to prevent console messages
-        # from revealing traitors
-        self._deop_all_players(players)
-
-        # Disable chat
         self._disable_chat(players)
 
-        # Disable PvP at game start (will be re-enabled 60 seconds later)
+        # Disable PvP at game start (will be re-enabled after configurable delay)
         self._disable_pvp()
+
+        # Schedule PvP re-enable after delay
+        pvp_delay_seconds = self.config.get("pvp_delay_seconds", 60)
+        threading.Timer(pvp_delay_seconds, self._enable_pvp).start()
 
         # Set up world border (shrinking)
         self._setup_world_border()
@@ -534,14 +498,10 @@ class MoleHuntGameState:
                     self.tracking_thread = threading.Thread(
                         target=self._track_nearest_players, daemon=True)
                     self.tracking_thread.start()
-                    self.logger.info(
-                        "Player tracking enabled (actionbar mode)")
                 elif tracking_config.get("enabled", False) and tracking_config.get("use_mod", False):
-                    self.logger.info(
-                        "Player tracking enabled (Modern Player Finder mod)")
+                    pass  # Mod handles tracking, no thread needed
         else:
             self.status = GameStatus.IN_PROGRESS
-            self.logger.info("Test mode: Monitoring disabled (single player)")
 
             # In test mode, enable tracking if player is traitor
             # Use regular tracking if simulated player will be spawned (treats simulated player like real player)
@@ -553,32 +513,22 @@ class MoleHuntGameState:
                 # If we're spawning a simulated player, use regular tracking
                 # (treats simulated player like real player)
                 if spawn_simulated_player:
-                    self.logger.info(
-                        f"Using regular tracking - simulated player will be treated as real player")
                     self.tracking_thread = threading.Thread(
                         target=self._track_nearest_players, daemon=True)
                 else:
-                    self.logger.info(
-                        f"Using test mode tracking (no simulated player)")
                     self.tracking_thread = threading.Thread(
                         target=self._track_nearest_players_test_mode, daemon=True)
                 self.tracking_thread.start()
-                self.logger.info("Player tracking enabled (actionbar mode)")
                 # Give thread a moment to start
                 time.sleep(0.5)
-                self.logger.info(
-                    f"Tracking thread started: {self.tracking_thread.is_alive()}")
             elif (test_mode and len(players) == 1 and test_role == Role.TRAITOR and
                     tracking_config.get("enabled", False) and tracking_config.get("use_mod", False)):
-                self.logger.info(
-                    "Modern Player Finder mod enabled - traitors received finder items")
+                pass  # Mod handles tracking, no thread needed
 
         # Spawn simulated player if requested in test mode
         if test_mode and spawn_simulated_player and len(players) == 1:
-            self.logger.info(
-                f"Attempting to spawn simulated player for {players[0]}...")
             if self._spawn_simulated_player(players[0], distance=10.0):
-                self.logger.info("Simulated player spawned for testing")
+                pass
             else:
                 self.logger.warning(
                     "Failed to spawn simulated player - check logs for details")
@@ -595,40 +545,35 @@ class MoleHuntGameState:
         self.monitor_running = False
         self.tracking_running = False
 
-        # Get all online players
         players = self.rcon.get_online_players()
 
-        # Clear all effects from all players
         for player in players:
             self.abilities.clear_all_effects(player)
 
-        # Remove Modern Player Finder items from traitors
         traitors = self.role_manager.get_traitors()
         self.abilities.remove_finder_items(traitors)
 
-        # Remove simulated player if it exists
         self._remove_simulated_player()
 
-        # Restore original skins
         self.skin_manager.restore_original_skins()
 
-        # Restore gamemodes for all players
-        self._restore_gamemodes()
+        # Set all players to survival mode
+        self._execute_command("gamemode survival @a")
+        players = self.rcon.get_online_players()
+        for player in players:
+            self._execute_command(f"gamemode survival {player}")
 
-        # Re-enable chat
+        # Set time to day and disable daylight cycle
+        self._execute_command("time set day")
+        self._execute_command("gamerule doDaylightCycle false")
+        self._execute_command("deathspectator setconfig enabled false")
+
         self._enable_chat()
-
-        # Restore operator status to players who had it before the game
-        self._restore_ops()
-
-        # Heal all players to full health
         self._heal_all_players(players)
 
         # Clean up death scoreboard if it exists
-        try:
-            self.rcon.execute("scoreboard objectives remove deaths")
-        except Exception:
-            pass  # Scoreboard might not exist, ignore error
+        # Scoreboard might not exist, ignore error
+        self._execute_command("scoreboard objectives remove deaths")
 
         # Reset state
         self.role_manager.reset()
@@ -637,7 +582,6 @@ class MoleHuntGameState:
         self.alive_players.clear()
         self.death_counts.clear()
         self.pending_deaths.clear()
-        self.original_gamemodes.clear()
 
         self.notifications.tellraw_all("§7Game stopped by admin", "gray")
         self.logger.info("Game stopped")
@@ -788,7 +732,6 @@ class MoleHuntGameState:
         while self.tracking_running and self.status == GameStatus.IN_PROGRESS:
             try:
                 loop_count += 1
-                self.logger.info(f"Tracking loop iteration {loop_count}")
 
                 traitors = self.role_manager.get_traitors()
                 innocents = self.role_manager.get_innocents()
@@ -796,7 +739,6 @@ class MoleHuntGameState:
                     f"Traitors: {traitors}, Innocents: {innocents}")
 
                 online_players = self.rcon.get_online_players()
-                self.logger.info(f"Online players: {online_players}")
 
                 # If RCON failed, online_players will be empty list - skip this
                 # iteration
@@ -813,9 +755,6 @@ class MoleHuntGameState:
                     t for t in traitors if t in self.alive_players and t in online_players]
                 alive_innocents = [
                     i for i in innocents if i in self.alive_players and i in online_players]
-
-                self.logger.info(
-                    f"Alive traitors: {alive_traitors}, Alive innocents (before simulated check): {alive_innocents}")
 
                 # Also check for simulated player - treat it exactly like a real player
                 # Find the actual player name (case-insensitive match) and add
@@ -840,25 +779,16 @@ class MoleHuntGameState:
                                 # actual name
                                 if player in self.alive_players:
                                     alive_innocents.append(player)
-                                    self.logger.info(
-                                        f"Added simulated player '{player}' to alive_innocents (treating as real player)")
                                 else:
                                     # Simulated player is online but not in alive_players - add it now
                                     # This handles the case where spawn command
                                     # appeared to fail but player actually
                                     # spawned
-                                    self.logger.info(
-                                        f"Simulated player '{player}' found online but not in alive_players - adding now")
                                     if player not in self.role_manager.roles:
                                         self.role_manager.roles[player] = Role.INNOCENT
                                     self.alive_players.add(player)
                                     alive_innocents.append(player)
-                                    self.logger.info(
-                                        f"Added simulated player '{player}' to alive_players and alive_innocents")
                                 break
-
-                self.logger.info(
-                    f"Alive traitors: {alive_traitors}, Alive innocents (final): {alive_innocents}")
 
                 if not alive_traitors:
                     self.logger.warning(
@@ -912,8 +842,6 @@ class MoleHuntGameState:
                             if innocent_pos:
                                 direction = self._calculate_direction(
                                     traitor_pos, innocent_pos)
-                                self.logger.info(
-                                    f"Direction from {traitor} to {nearest_innocent}: {direction}")
 
                         if show_distance:
                             if direction:
@@ -921,13 +849,9 @@ class MoleHuntGameState:
                             else:
                                 message = f"{time_str}§c§lNearest: §r§e{nearest_innocent} §7({nearest_distance:.0f}m)"
                             self.notifications.actionbar(traitor, message)
-                            self.logger.info(
-                                f"Sent actionbar to {traitor}: {message}")
                         else:
                             message = f"{time_str}§c§lNearest: §r§e{nearest_innocent}"
                             self.notifications.actionbar(traitor, message)
-                            self.logger.info(
-                                f"Sent actionbar to {traitor}: {message}")
                     else:
                         self.logger.warning(
                             f"No nearest innocent found for {traitor}")
@@ -956,12 +880,7 @@ class MoleHuntGameState:
             return
 
         traitor = traitors[0]
-        self.logger.info(f"Starting test mode tracking for {traitor}")
-        self.logger.info(
-            f"Tracking config: interval={update_interval}s, distance={show_distance}, direction={show_direction}")
-
         # Send initial test message to confirm tracking is working
-        self.logger.info(f"Sending initial test message to {traitor}")
         self.notifications.actionbar(traitor, "§a§lTracking Active!")
         time.sleep(1)
 
@@ -969,8 +888,6 @@ class MoleHuntGameState:
         while self.tracking_running and self.status == GameStatus.IN_PROGRESS:
             try:
                 loop_count += 1
-                self.logger.info(
-                    f"Tracking loop iteration {loop_count} for {traitor}")
 
                 traitor_pos = self._get_player_coordinates(traitor)
                 if not traitor_pos:
@@ -979,14 +896,9 @@ class MoleHuntGameState:
                     time.sleep(update_interval)
                     continue
 
-                self.logger.info(
-                    f"Traitor '{traitor}' position: {traitor_pos}")
-
                 # Check if we have a simulated player (armor stand or Carpet
                 # player)
                 simulated_pos = self._get_simulated_player_coordinates()
-                self.logger.info(
-                    f"Simulated player check: name='{self.simulated_player_name}', simulated_pos={simulated_pos}")
                 if not simulated_pos:
                     self.logger.warning(
                         f"Could not get simulated player coordinates - skipping this iteration")
@@ -1025,8 +937,6 @@ class MoleHuntGameState:
                 else:
                     message = f"{time_str}§c§lNearest: §r§e{self.simulated_player_name}"
 
-                self.logger.info(
-                    f"Sending actionbar to {traitor}: {message}")
                 try:
                     self.notifications.actionbar(traitor, message)
                     self.logger.debug(
@@ -1046,8 +956,6 @@ class MoleHuntGameState:
                 self.logger.error(
                     f"Error in test mode tracking thread: {e}", exc_info=True)
                 time.sleep(update_interval)
-
-        self.logger.info(f"Tracking thread ended for {traitor}")
 
     def _monitor_game(self):
         """Monitor game state and check win conditions"""
@@ -1082,7 +990,6 @@ class MoleHuntGameState:
                         f"Win condition detected: {winner} wins - {reason}. Ending game...")
                     try:
                         self._end_game(winner, reason)
-                        self.logger.info("Game ended successfully")
                     except Exception as e:
                         self.logger.error(
                             f"Error ending game: {e}", exc_info=True)
@@ -1124,14 +1031,20 @@ class MoleHuntGameState:
             # Wait 0.5 seconds before confirming death (prevents false positives)
             verification_delay = 0.5
 
+            # Log alive counts
+            alive_traitors = [
+                p for p in self.role_manager.get_traitors() if p in self.alive_players]
+            alive_innocents = [
+                p for p in self.role_manager.get_innocents() if p in self.alive_players]
+            self.logger.info(
+                f"Death check: {len(self.alive_players)} alive players ({len(alive_traitors)} traitors, {len(alive_innocents)} innocents)")
+
             # Remove players who disconnected from alive list
             disconnected = self.alive_players - online_players
             for player in disconnected:
                 self.alive_players.discard(player)
                 # Clear pending death if disconnected
                 self.pending_deaths.pop(player, None)
-                self.logger.info(
-                    f"{player} disconnected and was removed from alive players")
 
             # Check all online players (not just those in alive_players)
             # This ensures we catch players who should be alive but aren't tracked
@@ -1208,7 +1121,7 @@ class MoleHuntGameState:
                                         f"Cleared pending death for {player} (no longer in spectator)")
 
                                 # Ensure they're in alive_players (if they were part of the game OR are simulated player)
-                                if (player in self.original_gamemodes or is_simulated) and player not in self.alive_players:
+                                if (player in self.death_counts or is_simulated) and player not in self.alive_players:
                                     self.alive_players.add(player)
                                     self.logger.debug(
                                         f"Added {player} back to alive_players (not in spectator)")
@@ -1221,70 +1134,6 @@ class MoleHuntGameState:
 
         except Exception as e:
             self.logger.error(f"Error checking deaths: {e}")
-
-    def _restore_gamemodes(self):
-        """Restore all players to survival mode (always set to survival at game end)"""
-        try:
-            # First, use @a selector to set all players to survival
-            self.logger.info(
-                "Setting all players to survival mode using @a selector")
-            try:
-                response = self.rcon.execute("gamemode survival @a")
-                self.logger.info(f"Gamemode command response: {response}")
-            except Exception as e:
-                self.logger.warning(
-                    f"Could not set all players to survival via @a: {e}")
-
-            # Also set individual players as backup
-            online_players = self.rcon.get_online_players()
-            self.logger.info(
-                f"Found {len(online_players)} online players to set to survival")
-            for player in online_players:
-                try:
-                    response = self.rcon.execute(f"gamemode survival {player}")
-                    self.logger.info(
-                        f"Set {player} to survival mode: {response}")
-                except Exception as e:
-                    self.logger.warning(
-                        f"Could not set {player} to survival: {e}")
-
-            # Double-check: ensure all players are out of spectator mode
-            time.sleep(1.0)  # Give commands time to process
-            online_players = self.rcon.get_online_players()
-            self.logger.info(
-                f"Verifying gamemodes for {len(online_players)} players")
-            for player in online_players:
-                try:
-                    response = self.rcon.execute(
-                        f"data get entity {player} playerGameType")
-                    if response and "No entity" not in response:
-                        try:
-                            gamemode_id = int(response.split()[-1])
-                            self.logger.info(
-                                f"{player} gamemode ID: {gamemode_id}")
-                            if gamemode_id == 3:  # Still in spectator
-                                self.logger.warning(
-                                    f"{player} still in spectator (ID=3), forcing to survival")
-                                self.rcon.execute(
-                                    f"gamemode survival {player}")
-                                time.sleep(0.3)  # Brief delay between commands
-                        except (ValueError, IndexError) as e:
-                            self.logger.debug(
-                                f"Error parsing gamemode for {player}: {e}")
-                except Exception as e:
-                    self.logger.debug(
-                        f"Error checking gamemode for {player}: {e}")
-
-            # Final attempt: use @a again to ensure everyone is in survival
-            time.sleep(0.5)
-            try:
-                self.rcon.execute("gamemode survival @a")
-                self.logger.info("Final @a survival command executed")
-            except Exception as e:
-                self.logger.warning(f"Final @a survival command failed: {e}")
-
-        except Exception as e:
-            self.logger.error(f"Error restoring gamemodes: {e}", exc_info=True)
 
     def _clear_all_inventories(self, players: List[str]):
         """Clear all players' inventories at game start"""
@@ -1345,78 +1194,14 @@ class MoleHuntGameState:
             # Reset hunger/saturation to full for all players
             self.rcon.execute(
                 "effect give @a minecraft:saturation 10 255 true")
-            self.logger.info("Reset health and hunger for all players")
         except Exception as e:
             self.logger.warning(f"Error resetting health and hunger: {e}")
-
-    def _deop_all_players(self, players: List[str]):
-        """Remove operator status from all players to prevent console messages from revealing traitors"""
-        # try:
-        #     # Get list of current ops from ops.json (if accessible) or by checking each player
-        #     # We'll store the list and restore it later
-        #     self.original_ops = []
-
-        #     # Try to read ops.json to get the list of ops
-        #     try:
-        #         ops_file = "ops.json"
-        #         if os.path.exists(ops_file):
-        #             with open(ops_file, 'r', encoding='utf-8') as f:
-        #                 ops_data = json.load(f)
-        #                 if isinstance(ops_data, list):
-        #                     self.original_ops = [
-        #                         op.get('name', '') for op in ops_data if isinstance(op, dict) and 'name' in op]
-        #                 elif isinstance(ops_data, dict) and 'ops' in ops_data:
-        #                     self.original_ops = [op.get('name', '') for op in ops_data['ops'] if isinstance(
-        #                         op, dict) and 'name' in op]
-        #     except Exception as e:
-        #         self.logger.debug(f"Could not read ops.json: {e}")
-
-        #     # Deop all players (even if we couldn't read ops.json, deop them anyway)
-        #     for player in players:
-        #         try:
-        #             self.rcon.execute(f"deop {player}")
-        #             self.logger.debug(f"Deopped {player}")
-        #         except Exception as e:
-        #             self.logger.debug(f"Could not deop {player}: {e}")
-
-        #     self.logger.info(
-        #         f"Removed operator status from all players (stored {len(self.original_ops)} original ops)")
-        # except Exception as e:
-        #     self.logger.warning(f"Error deopping players: {e}")
-
-    def _restore_ops(self):
-        """Restore operator status to players who had it before the game"""
-        try:
-            if not self.original_ops:
-                self.logger.debug("No original ops to restore")
-                return
-
-            online_players = self.rcon.get_online_players()
-            restored_count = 0
-
-            for op_name in self.original_ops:
-                # Only restore if player is online
-                if op_name in online_players:
-                    try:
-                        self.rcon.execute(f"op {op_name}")
-                        restored_count += 1
-                        self.logger.debug(f"Restored op status to {op_name}")
-                    except Exception as e:
-                        self.logger.debug(
-                            f"Could not restore op status to {op_name}: {e}")
-
-            self.logger.info(
-                f"Restored operator status to {restored_count} player(s)")
-            self.original_ops = []  # Clear the list
-        except Exception as e:
-            self.logger.warning(f"Error restoring ops: {e}")
 
     def _setup_world_border(self):
         """Set up a shrinking world border for the game"""
         try:
             world_border_config = self.config.get("world_border", {})
             if not world_border_config.get("enabled", False):
-                self.logger.info("World border is disabled in config")
                 return
 
             initial_size = world_border_config.get("initial_size", 2000)
@@ -1551,36 +1336,26 @@ class MoleHuntGameState:
             self.logger.warning(f"Error resetting world border: {e}")
 
     def _disable_pvp(self):
-        """Disable PvP at game start"""
-        try:
-            # Get current PvP state
-            response = self.rcon.execute("gamerule pvp")
-            if response:
-                # Parse response like "pvp = true" or "pvp = false"
-                if "true" in response.lower():
-                    self.original_pvp_state = True
-                else:
-                    self.original_pvp_state = False
-            else:
-                self.original_pvp_state = True  # Default to True if can't determine
-
-            # Disable PvP
-            self.rcon.execute("gamerule pvp false")
-            self.logger.info(
-                "PvP disabled (will be re-enabled 60 seconds after game start)")
-        except Exception as e:
-            self.logger.warning(f"Error disabling PvP: {e}")
+        """Disable PvP at game start using high resistance effect"""
+        players = self.rcon.get_online_players()
+        for player in players:
+            # Give resistance level 5 (100% damage reduction) for a very long duration
+            self._execute_command(
+                f"effect give {player} minecraft:resistance 999999 5 true")
+        pvp_delay_seconds = self.config.get("pvp_delay_seconds", 60)
+        self.logger.info(
+            f"PvP disabled via resistance effect for {len(players)} player(s) (will be re-enabled in {pvp_delay_seconds} seconds)")
 
     def _enable_pvp(self):
-        """Re-enable PvP 60 seconds after game start"""
-        try:
-            self.rcon.execute("gamerule pvp true")
-            self.notifications.tellraw_all("§c§lPvP ENABLED", "red")
-            self.notifications.tellraw_all(
-                "§7Players can now attack each other!", "yellow")
-            self.logger.info("PvP enabled (60 seconds after game start)")
-        except Exception as e:
-            self.logger.warning(f"Error enabling PvP: {e}")
+        """Re-enable PvP after delay by removing resistance effect"""
+        players = self.rcon.get_online_players()
+        for player in players:
+            self._execute_command(
+                f"effect clear {player} minecraft:resistance")
+        self.notifications.tellraw_all(
+            "§c§lPvP ENABLED §7- Players can now attack each other!", "red")
+        self.logger.info(
+            f"PvP enabled (removed resistance effect from {len(players)} player(s))")
 
     def _teleport_players_to_spawn(
             self,
@@ -1662,26 +1437,22 @@ class MoleHuntGameState:
 
     def _show_welcome_screen(self, players: List[str]):
         """Show welcome screen before countdown"""
-        try:
-            for player in players:
-                try:
-                    # Show welcome title with longer display time
-                    self.rcon.execute(f"title {player} times 0 80 20")
-                    self.rcon.execute(
-                        f"title {player} title {{\"text\":\"§6§lMOLE HUNT\",\"bold\":true}}")
-                    self.rcon.execute(
-                        f"title {player} subtitle {{\"text\":\"§7Prepare for the game!\",\"bold\":false}}")
-                except Exception as e:
-                    self.logger.debug(
-                        f"Could not send welcome title to {player}: {e}")
+        for player in players:
+            # Show welcome title with longer display time
+            self._execute_command(f"title {player} times 0 80 20")
+            self._execute_command(
+                f"title {player} title {{\"text\":\"§6§lMOLE HUNT\",\"bold\":true}}")
+            self._execute_command(
+                f"title {player} subtitle {{\"text\":\"§7Prepare for the game!\",\"bold\":false}}")
 
-            self.notifications.tellraw_all("§6=== MOLE HUNT ===", "gold")
-            self.notifications.tellraw_all(
-                "§7Welcome! The game will begin shortly...", "yellow")
-            # Show welcome screen for 5 seconds to ensure it's visible
-            time.sleep(5)
-        except Exception as e:
-            self.logger.warning(f"Error showing welcome screen: {e}")
+        self.notifications.tellraw_all("§6=== MOLE HUNT ===", "gold")
+        self.notifications.tellraw_all(
+            "§7Welcome! The game will begin shortly...", "yellow")
+        pvp_delay_seconds = self.config.get("pvp_delay_seconds", 60)
+        self.notifications.tellraw_all(
+            f"§cPvP will be enabled in {pvp_delay_seconds} seconds", "red")
+        # Show welcome screen for 5 seconds to ensure it's visible
+        time.sleep(5)
 
     def _countdown_and_start(
             self,
@@ -1692,13 +1463,13 @@ class MoleHuntGameState:
             # Show welcome screen first
             self._show_welcome_screen(players)
 
-            # Set time to day and weather to clear
-            try:
-                self.rcon.execute("time set day")
-                self.rcon.execute("weather clear")
-                self.logger.info("Set time to day and weather to clear")
-            except Exception as e:
-                self.logger.warning(f"Could not set time/weather: {e}")
+            # Set time to day, weather to clear, enable daylight cycle, and enable death spectator
+            self._execute_command("time set day")
+            self._execute_command("weather clear")
+            self._execute_command("gamerule doDaylightCycle true")
+            self._execute_command("deathspectator setconfig enabled true")
+            self.logger.info(
+                "Set time to day, weather to clear, enabled daylight cycle, and enabled death spectator")
 
             # Store player positions to freeze them in place
             player_positions = {}
@@ -1790,6 +1561,11 @@ class MoleHuntGameState:
 
             self.notifications.tellraw_all("§a§lGAME STARTED!", "green")
 
+            # Enable daylight cycle and death spectator at game start
+            self._execute_command("gamerule doDaylightCycle true")
+            self._execute_command("deathspectator setconfig enabled true")
+            self.logger.info("Enabled daylight cycle and death spectator")
+
             # Restore survival mode and clear effects to allow movement
             for player in players:
                 try:
@@ -1807,124 +1583,68 @@ class MoleHuntGameState:
             return False
 
     def _disable_chat(self, players: List[str]):
-        """Disable chat for all players using teams (vanilla method)"""
+        """Disable chat for all players using FTB Essentials mute"""
         try:
-            # Try mod commands first (if mods are installed)
-            # Common chat disable mods:
-            # - "Disable Chat" mod: /chat disable
-            # - "AntiChat" mod: /antichat enable
-            # - "Chat Control" mod: /chatcontrol disable
-            # - Generic: /chat disable, disablechat
-            text_chat_commands = [
-                "chat disable",  # Disable Chat mod
-                "/chat disable",  # Disable Chat mod (with slash)
-                "antichat enable",  # AntiChat mod
-                "/antichat enable",  # AntiChat mod (with slash)
-                "chatcontrol disable",  # Chat Control mod
-                "/chatcontrol disable",  # Chat Control mod (with slash)
-                "disablechat",  # Generic alternative
-                "/disablechat",  # Generic alternative (with slash)
-            ]
-
-            for cmd in text_chat_commands:
-                try:
-                    response = self.rcon.execute(cmd)
-                    if response and "unknown" not in response.lower() and "error" not in response.lower():
-                        self.logger.info(
-                            f"Disabled chat using mod command: {cmd}")
-                        self.chat_disabled = True
-                        return
-                except BaseException:
-                    pass
-
-            # Vanilla method: Put each player in their own team to prevent cross-player chat
-            # Players in different teams cannot see each other's chat messages
-            base_team_name = "molehunt_"
-
+            # FTB Essentials requires muting each player individually
+            muted_count = 0
             for player in players:
-                team_name = f"{base_team_name}{player}"
                 try:
-                    # Create a unique team for each player
-                    self.rcon.execute(f"team add {team_name}")
-                    # Set team to not see friendly invisibles (prevents some
-                    # interactions)
-                    self.rcon.execute(
-                        f"team modify {team_name} seeFriendlyInvisibles false")
-                    # Hide nametags for anonymity
-                    self.rcon.execute(
-                        f"team modify {team_name} nametagVisibility never")
-                    # Add player to their own isolated team
-                    self.rcon.execute(f"team join {team_name} {player}")
-                    # Hide chat and death messages for this player's team
-                    self.rcon.execute(
-                        f"team modify {team_name} chatVisibility hidden")
-                    self.rcon.execute(
-                        f"team modify {team_name} deathMessageVisibility never")
+                    response = self.rcon.execute(f"mute {player}")
+                    if response and "unknown" not in response.lower() and "error" not in response.lower():
+                        self.logger.debug(
+                            f"Muted {player} using FTB Essentials")
+                        muted_count += 1
+                    else:
+                        self.logger.warning(
+                            f"FTB Essentials mute failed for {player}: {response}")
                 except Exception as e:
-                    self.logger.debug(
-                        f"Could not create team for {player}: {e}")
+                    self.logger.warning(
+                        f"Error muting {player} with FTB Essentials: {e}")
 
-            self.logger.info(
-                "Chat disabled using teams (each player in separate team - prevents cross-player chat)")
-            self.chat_disabled = True
+            if muted_count > 0:
+                self.logger.info(
+                    f"Disabled chat using FTB Essentials: muted {muted_count}/{len(players)} player(s)")
+                self.chat_disabled = True
+            else:
+                self.logger.error(
+                    "Failed to mute any players with FTB Essentials")
 
         except Exception as e:
-            self.logger.warning(f"Could not disable chat: {e}")
-            self.logger.info(
-                "Note: For full chat disable, consider installing a mod like 'Disable Chat' or 'Chat Control'")
+            self.logger.error(f"Could not disable chat: {e}")
 
     def _enable_chat(self):
-        """Re-enable chat for all players"""
+        """Re-enable chat for all players using FTB Essentials unmute"""
         if not self.chat_disabled:
             return
 
         try:
-            # Try mod commands first (if mods were used)
-            # Common chat enable mods:
-            # - "Disable Chat" mod: /chat enable
-            # - "AntiChat" mod: /antichat disable
-            # - "Chat Control" mod: /chatcontrol enable
-            text_chat_commands = [
-                "chat enable",  # Disable Chat mod
-                "/chat enable",  # Disable Chat mod (with slash)
-                "antichat disable",  # AntiChat mod
-                "/antichat disable",  # AntiChat mod (with slash)
-                "chatcontrol enable",  # Chat Control mod
-                "/chatcontrol enable",  # Chat Control mod (with slash)
-                "enablechat",  # Generic alternative
-                "/enablechat",  # Generic alternative (with slash)
-            ]
-
-            for cmd in text_chat_commands:
-                try:
-                    response = self.rcon.execute(cmd)
-                    if response and "unknown" not in response.lower() and "error" not in response.lower():
-                        self.logger.info(
-                            f"Enabled chat using mod command: {cmd}")
-                        self.chat_disabled = False
-                        return
-                except BaseException:
-                    pass
-
-            # Remove players from their isolated teams
+            # FTB Essentials requires unmuting each player individually
             online_players = self.rcon.get_online_players()
-            base_team_name = "molehunt_"
-
+            unmuted_count = 0
             for player in online_players:
                 try:
-                    # Remove player from their team
-                    self.rcon.execute(f"team leave {player}")
-                    # Remove the team
-                    team_name = f"{base_team_name}{player}"
-                    self.rcon.execute(f"team remove {team_name}")
-                except BaseException:
-                    pass  # Team might not exist, ignore
+                    response = self.rcon.execute(f"unmute {player}")
+                    if response and "unknown" not in response.lower() and "error" not in response.lower():
+                        self.logger.debug(
+                            f"Unmuted {player} using FTB Essentials")
+                        unmuted_count += 1
+                    else:
+                        self.logger.debug(
+                            f"FTB Essentials unmute response for {player}: {response}")
+                except Exception as e:
+                    self.logger.warning(
+                        f"Error unmuting {player} with FTB Essentials: {e}")
 
-            self.logger.info("Chat re-enabled (teams removed)")
-            self.chat_disabled = False
+            if unmuted_count > 0:
+                self.logger.info(
+                    f"Enabled chat using FTB Essentials: unmuted {unmuted_count}/{len(online_players)} player(s)")
+                self.chat_disabled = False
+            else:
+                self.logger.error(
+                    "Failed to unmute any players with FTB Essentials")
 
         except Exception as e:
-            self.logger.warning(f"Could not enable chat: {e}")
+            self.logger.error(f"Could not enable chat: {e}")
 
     def _end_game(self, winner: str, reason: str):
         """End the game"""
@@ -1932,8 +1652,6 @@ class MoleHuntGameState:
         self.logger.info(
             f"_end_game called (before lock) with winner={winner}, reason={reason}, current_status={self.status}")
         with self._end_game_lock:
-            self.logger.info(
-                f"_end_game called (inside lock) with winner={winner}, reason={reason}, current_status={self.status}")
 
             # If already announced, skip (regardless of status)
             if self._game_ended_announced:
@@ -1960,73 +1678,27 @@ class MoleHuntGameState:
                 self.status = GameStatus.ENDED
                 self.monitor_running = False
                 self.tracking_running = False
-                self.logger.info(f"Game status set to ENDED, threads stopped")
             else:
                 self.logger.info(
                     f"Game status already ENDED, continuing with announcement")
 
-            # Get all online players
             players = self.rcon.get_online_players()
-
-            # Teleport all players to spawn and space them out
             self._teleport_players_to_spawn(players, spacing=10.0)
 
-            # Set all players to survival mode immediately after teleport
             self.logger.info(
                 "Setting all players to survival mode after teleport")
-            try:
-                # Use @a selector for immediate effect
-                self.rcon.execute("gamemode survival @a")
-                self.logger.info("Set all players to survival via @a")
-                # Also set individually as backup
-                for player in players:
-                    try:
-                        self.rcon.execute(f"gamemode survival {player}")
-                        self.logger.info(f"Set {player} to survival mode")
-                    except Exception as e:
-                        self.logger.warning(
-                            f"Could not set {player} to survival: {e}")
-            except Exception as e:
-                self.logger.warning(f"Error setting players to survival: {e}")
+            self._execute_command("gamemode survival @a")
+            for player in players:
+                self._execute_command(f"gamemode survival {player}")
 
-            # Wait for commands to process before sending messages
-            self.logger.info(
-                "Waiting 1.5 seconds before sending announcement...")
-            self.logger.info("About to sleep for 1.5 seconds...")
             try:
                 time.sleep(1.5)
-                self.logger.info("Sleep complete, proceeding to announcement")
             except Exception as e:
                 self.logger.error(f"Error during sleep: {e}", exc_info=True)
-                # Continue anyway
 
-            # Announce winners so players can see the message
-            self.logger.info("Reached announcement section after sleep")
-            self.logger.info(
-                f"Announcing game end: winner={winner}, reason={reason}")
-            self.logger.info(
-                f"About to call announce_game_end with winner={winner}, reason={reason}")
-            self.logger.info(
-                f"Current _game_ended_announced flag: {self._game_ended_announced}")
             announcement_sent = False
-            self.logger.info(
-                f"Starting announcement block, announcement_sent={announcement_sent}")
-            self.logger.info(f"About to enter try block for announcement")
             try:
-                self.logger.info(
-                    "Inside try block, about to call announce_game_end")
-                # Send announcement once
-                self.logger.info(
-                    f"Calling announce_game_end with winner={winner}, reason={reason}")
-                self.logger.info(
-                    f"self.notifications object: {self.notifications}")
-                self.logger.info(
-                    f"announce_game_end method exists: {hasattr(self.notifications, 'announce_game_end')}")
                 self.notifications.announce_game_end(winner, reason)
-                self.logger.info(
-                    "announce_game_end call completed without exception")
-                self.logger.info(
-                    "Game end announcement sent to players")
                 announcement_sent = True
                 self._game_ended_announced = True
             except Exception as e:
@@ -2034,10 +1706,8 @@ class MoleHuntGameState:
                     f"Error sending game end announcement: {e}", exc_info=True)
                 # Try to send at least a simple message if the full announcement fails
                 try:
-                    self.logger.info("Attempting fallback message...")
                     self.notifications.tellraw_all(
                         f"§6GAME ENDED: {winner} won - {reason}", "gold")
-                    self.logger.info("Sent fallback game end message")
                     announcement_sent = True
                     self._game_ended_announced = True
                 except Exception as e2:
@@ -2051,16 +1721,13 @@ class MoleHuntGameState:
                     # Try direct RCON commands as last resort
                     self.rcon.execute(
                         f'tellraw @a {{"text":"§6GAME ENDED: {winner} won - {reason}","color":"gold"}}')
-                    self.logger.info("Sent direct RCON game end message")
                     self._game_ended_announced = True
                 except Exception as e3:
                     self.logger.error(
                         f"Direct RCON message also failed: {e3}", exc_info=True)
 
-            # Wait a moment for the title to display
             time.sleep(2)
 
-            # Reveal roles
             self.notifications.tellraw_all("§6=== ROLE REVEAL ===", "gold")
             traitors = self.role_manager.get_traitors()
             innocents = self.role_manager.get_innocents()
@@ -2072,41 +1739,24 @@ class MoleHuntGameState:
 
             self.logger.info(f"Game ended: {winner} won - {reason}")
 
-            # Wait before cleanup so players can see the win message and role reveal
-            delay_seconds = self.config.get("end_game_delay_seconds", 10)
-            self.logger.info(
-                f"Waiting {delay_seconds} seconds before cleanup...")
+            delay_seconds = self.config.get("end_game_delay_seconds", 3)
             self.notifications.tellraw_all(
                 f"§7Cleanup will begin in {delay_seconds} seconds...", "gray")
             time.sleep(delay_seconds)
 
         def cleanup_then_delay():
-            # Clear all inventories using @a selector
-            try:
-                self.rcon.execute("clear @a")
+            if self._execute_command("clear @a"):
                 self.logger.info("Cleared all inventories")
-            except Exception as e:
-                self.logger.warning(f"Could not clear inventories: {e}")
 
-            # Get fresh player list
             current_players = self.rcon.get_online_players()
 
-            # Clear all effects from all players
             for player in current_players:
-                try:
-                    self.abilities.clear_all_effects(player)
-                except Exception as e:
-                    self.logger.warning(
-                        f"Could not clear effects for {player}: {e}")
+                self._execute_command(f"effect clear {player}")
 
-            # Remove Modern Player Finder items from traitors
             traitors = self.role_manager.get_traitors()
             self.abilities.remove_finder_items(traitors)
 
-            # Remove simulated player if it exists
             self._remove_simulated_player()
-
-            # Restore original skins
             self.skin_manager.restore_original_skins()
 
             # Gamemodes already set to survival after teleport, but verify here
@@ -2133,26 +1783,26 @@ class MoleHuntGameState:
                 self.logger.warning(
                     f"Error verifying gamemodes during cleanup: {e}")
 
-            # Re-enable chat
-            self._enable_chat()
+            # Set time to day and disable daylight cycle
+            self._execute_command("time set day")
+            self._execute_command("gamerule doDaylightCycle false")
+            self._execute_command("deathspectator setconfig enabled false")
+            self.logger.info(
+                "Set time to day and disabled daylight cycle and death spectator")
 
-            # Reset world border
+            self._enable_chat()
             self._reset_world_border()
 
-            # Restore PvP state
-            if self.original_pvp_state is not None:
-                try:
-                    self.rcon.execute(
-                        f"gamerule pvp {str(self.original_pvp_state).lower()}")
-                    self.logger.info(
-                        f"Restored PvP to {self.original_pvp_state}")
-                except Exception as e:
-                    self.logger.warning(f"Error restoring PvP: {e}")
+            # Remove resistance effect from all players at game end
+            current_players = self.rcon.get_online_players()
+            for player in current_players:
+                self._execute_command(
+                    f"effect clear {player} minecraft:resistance")
+            if current_players:
+                self.logger.info(
+                    f"Removed resistance effect from {len(current_players)} player(s) at game end")
 
-            # Reset health and hunger for all players
             self._reset_health_and_hunger()
-
-            self.logger.info("Cleanup complete.")
 
         # Run cleanup then delay in a separate thread
         cleanup_thread = threading.Thread(
@@ -2169,5 +1819,3 @@ class MoleHuntGameState:
         self.timer_manager.reset()
         self.status = GameStatus.NOT_STARTED
         self.logger.info("Game reset")
-
-

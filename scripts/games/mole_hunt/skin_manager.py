@@ -140,4 +140,3 @@ class SkinManager:
 
         self.players_with_reset_skins = []  # Clear the list
         return success_count
-
